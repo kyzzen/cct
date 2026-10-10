@@ -18,6 +18,13 @@ const USER_KEYS: usize = 2003;
 const LIST_ITEMS: usize = 20_000;
 const BIG: usize = 2_000_000;
 
+/// Nested objects that a JSON column of the parent's table holds whole.
+const QUOTA_LIMITS: &str = r#"{"status":"rejected","resetsAt":1767225600,"unifiedRateLimitFallbackAvailable":false,"rateLimitType":"gx_window","overageStatus":"rejected","overageDisabledReason":"gx_reason","isUsingOverage":false,"upgradePaths":["gx_path"]}"#;
+const STAGED: &str = r#"[{"startUuid":"gx-1","endUuid":"gx-2","summary":"gx summary","risk":0.25,"stagedAt":1767225600000}]"#;
+const AUTOREACT_ARTIFACTS: &str = r#"{"gx-artifact":{"savedAt":1767225600000,"stampHighWater":null,"everBaselined":true,"everHadThreads":false,"turnTimestamps":[1767225600001],"threads":[{"gx":1}],"interrupted":true}}"#;
+const MONITOR_ARTIFACTS: &str =
+    r#"{"gx-artifact":{"state":"armed","writtenAtMs":1767225600000,"title":"gx title"}}"#;
+
 fn count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |r| r.get(0))
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
@@ -86,6 +93,24 @@ fn drift_cap_and_large_values() {
         items.join(",")
     )
     .unwrap();
+    // Four lines whose nested objects the writer stores by serialising the
+    // parent field whole into a JSON column.
+    for line in [
+        format!(
+            r#"{{"type":"assistant","uuid":"gx-s2",{ENVELOPE},"requestId":"gx-req","message":{{"id":"gx-msg-2","type":"message","role":"assistant","model":"gx-model","content":[{{"type":"text","text":"gx"}}],"stop_reason":"end_turn","stop_sequence":null,"usage":{{"input_tokens":1,"output_tokens":2}}}},"quotaLimits":{QUOTA_LIMITS}}}"#
+        ),
+        format!(
+            r#"{{"type":"marble-origami-snapshot","sessionId":"gx-session","staged":{STAGED},"armed":true,"lastSpawnTokens":7}}"#
+        ),
+        format!(
+            r#"{{"type":"artifact-autoreact-ledger","v":1,"sessionId":"gx-session","accountUuid":"gx-account","artifacts":{AUTOREACT_ARTIFACTS}}}"#
+        ),
+        format!(
+            r#"{{"type":"artifact-comment-monitor","v":1,"sessionId":"gx-session","artifacts":{MONITOR_ARTIFACTS}}}"#
+        ),
+    ] {
+        writeln!(text, "{line}").unwrap();
+    }
     // Last line: promoted keys on an entry type that does not carry them in
     // real input. Promotion goes by key, so each gets its typed row.
     writeln!(
@@ -238,6 +263,42 @@ fn drift_cap_and_large_values() {
         ),
         0
     );
+
+    // Nested objects the writer serialises with their parent field: the JSON
+    // column holds every member of the raw value, and the line has no
+    // catch-all row.
+    for (table, column, raw) in [
+        ("assistant_entries", "quota_limits", QUOTA_LIMITS),
+        ("marble_origami_snapshot_entries", "staged", STAGED),
+        (
+            "artifact_autoreact_ledger_entries",
+            "artifacts",
+            AUTOREACT_ARTIFACTS,
+        ),
+        (
+            "artifact_comment_monitor_entries",
+            "artifacts",
+            MONITOR_ARTIFACTS,
+        ),
+    ] {
+        let stored = stored_text(&format!(
+            "SELECT {column}::VARCHAR FROM {table} WHERE {column} IS NOT NULL"
+        ));
+        let stored: serde_json::Value = serde_json::from_str(&stored).expect("json column");
+        let raw: serde_json::Value = serde_json::from_str(raw).expect("raw json");
+        assert_eq!(stored, raw, "{table}.{column}");
+        assert_eq!(
+            count(
+                &conn,
+                &format!(
+                    "SELECT COUNT(*) FROM entry_extras x JOIN {table} t USING (entry_id) \
+                     WHERE t.{column} IS NOT NULL"
+                )
+            ),
+            0,
+            "{table}: catch-all row"
+        );
+    }
 
     // The line of another entry type that carries promoted keys.
     let foreign: (String, i64, String, i64) = conn
