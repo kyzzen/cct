@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod residual;
 pub mod types;
 
 use std::fs;

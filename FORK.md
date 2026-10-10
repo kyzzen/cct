@@ -25,6 +25,11 @@ git diff --stat v0.1.12..HEAD
 | `FORK.md` | new | This file. |
 | `crates/claude-code-transcripts-ingest/src/cli.rs` | changed, 1 line | `cct --version` prints `cct 0.1.12+corpusdb.N`: upstream's version with a fork suffix. `N` goes up for every build that is gated. `Cargo.toml` keeps upstream's version. |
 | `crates/claude-code-transcripts-ingest/src/update.rs` | changed, 8 lines added | `cct update` prints that this build does not self-update and exits 2, because an update would replace the fork binary with an upstream release. The subcommand and its help text stay. |
+| `crates/claude-code-transcripts/src/lib.rs` | changed, 1 line added | `pub mod residual;` |
+| `crates/claude-code-transcripts/src/residual.rs` | new | `residual(raw, round_trip)`: the sparse nested copy of a raw line that holds only what the typed round trip lost. `merge`: its inverse. `unreproduced`: the check that a merge reproduces every raw leaf. Total functions; the file denies `unwrap`, indexing and `panic` through clippy. |
+| `crates/claude-code-transcripts/examples/residual_census.rs` | new | Parse-only census over a directory: per entry type and stored place, how many lines and bytes the round trip loses. Prints paths, names and counts, never a value. The input directory is a required argument. |
+| `crates/claude-code-transcripts/tests/residual.rs` | new | Residual, merge and stored places over the `catch_all` fixture, hand-built pairs, further synthetic lines and generated large lines. |
+| `crates/claude-code-transcripts/tests/fixtures/` | new | `catch_all_residuals.json` (expected residual per fixture line), `residual_pairs.json` (hand-built raw and round-trip pairs), `review_cases.tsv` (further synthetic lines). |
 | `crates/claude-code-transcripts-ingest/tests/catch_all.rs` | new | End-to-end test of the fork's behaviour on one synthetic fixture directory. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/catch_all.jsonl` | new | Synthetic fixture: one line per way a line can carry something the typed parser does not model. Lines 34 and 35 are entry types the parser does not know. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/unknown_only.jsonl` | new | Synthetic fixture: a file that holds unknown entry types only. |
