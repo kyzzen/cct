@@ -34,7 +34,9 @@ git diff --stat v0.1.12..HEAD
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/catch_all.jsonl` | new | Synthetic fixture: one line per way a line can carry something the typed parser does not model. Lines 34 and 35 are entry types the parser does not know. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/unknown_only.jsonl` | new | Synthetic fixture: a file that holds unknown entry types only. |
 | `crates/claude-code-transcripts-ingest/src/fork_schema.rs` | new | DDL of the twelve tables the fork adds (`FORK_SCHEMA_DDL`) and one unique index per table on its key (`FORK_INDEXES_DDL`). No upstream table gains a column. |
-| `crates/claude-code-transcripts-ingest/src/lib.rs` | changed, 1 line added | `pub mod fork_schema;` |
+| `crates/claude-code-transcripts-ingest/src/lib.rs` | changed, 2 lines added | `pub mod extras;` and `pub mod fork_schema;` |
+| `crates/claude-code-transcripts-ingest/src/extras.rs` | new | The rows of the fork's tables for one line. Typed fields are read from the raw line with lenient accessors; a value leaves the catch-all only when the value rebuilt from its row equals the raw one; the residual of the line against the typed round trip is its `entry_extras` row. Also the `unparsed_lines` row of a line whose `type` the parser does not know, and the counters behind `ingest_drift` and `ingest_meta`. The file denies `unwrap`, indexing and `panic` through clippy. |
+| `crates/claude-code-transcripts-ingest/src/parse.rs` | changed, 16 lines added, 2 changed | `ParsedFile` gains `unparsed` and `drift`. A line of an unknown `type` is recorded before it is skipped. After `build_rows` succeeds, `extras::attach` adds the fork's rows to the entry's child rows. `json_str` becomes `pub(crate)` so that the fork's JSON columns are filled by the same function as upstream's. |
 | `crates/claude-code-transcripts-ingest/src/run.rs` | changed, 4 lines added | Runs `FORK_SCHEMA_DDL` right after upstream's schema and `FORK_INDEXES_DDL` right after upstream's indexes. |
 
 Every later change adds its row here.

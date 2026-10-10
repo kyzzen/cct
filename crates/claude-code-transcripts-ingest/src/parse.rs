@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+use crate::extras;
 use crate::pricing::{compute_cost, PriceRow};
 use claude_code_transcripts::types::{
     AssistantContentBlock, AttachmentData, CacheCreation, DocumentSource, Entry, ImageSource,
@@ -43,6 +44,9 @@ pub struct ParsedFile {
     pub unknown_models: Vec<String>,
     /// Enum names that had unrecognised variants dropped during parsing.
     pub unknown_variants: Vec<String>,
+    /// `unparsed_lines` rows: the lines whose `type` the parser does not know.
+    pub unparsed: Vec<Vec<Value>>,
+    pub drift: extras::Drift,
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +111,7 @@ fn of(v: Option<f64>) -> Value {
     }
 }
 
-fn json_str(v: &Value) -> Value {
+pub(crate) fn json_str(v: &Value) -> Value {
     Value::String(serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()))
 }
 
@@ -180,6 +184,8 @@ pub fn parse_file(path: &Path, pricing: &HashMap<String, PriceRow>) -> ParsedFil
     let mut session_id: Option<String> = None;
     let mut unknown_models: Vec<String> = Vec::new();
     let mut unknown_variants: Vec<String> = Vec::new();
+    let mut unparsed: Vec<Vec<Value>> = Vec::new();
+    let mut drift = extras::Drift::default();
 
     let mtime = fs::metadata(path)
         .ok()
@@ -210,6 +216,8 @@ pub fn parse_file(path: &Path, pricing: &HashMap<String, PriceRow>) -> ParsedFil
                 failures,
                 unknown_models,
                 unknown_variants,
+                unparsed,
+                drift,
             };
         }
     };
@@ -246,6 +254,7 @@ pub fn parse_file(path: &Path, pricing: &HashMap<String, PriceRow>) -> ParsedFil
         };
 
         if matches!(entry, Entry::Unknown) {
+            unparsed.push(drift.unparsed(&file_path, line_no, &raw_value, trimmed));
             continue;
         }
 
@@ -260,7 +269,10 @@ pub fn parse_file(path: &Path, pricing: &HashMap<String, PriceRow>) -> ParsedFil
             &mut unknown_models,
             &mut unknown_variants,
         ) {
-            Ok(rows) => entries.push(rows),
+            Ok(mut rows) => {
+                extras::attach(&raw_value, &entry, &mut rows, &mut drift);
+                entries.push(rows)
+            }
             Err(e) => failures.push((line_no, e)),
         }
     }
@@ -282,6 +294,8 @@ pub fn parse_file(path: &Path, pricing: &HashMap<String, PriceRow>) -> ParsedFil
         failures,
         unknown_models,
         unknown_variants,
+        unparsed,
+        drift,
     }
 }
 

@@ -132,8 +132,8 @@ fn fixture_residuals_match_expected_and_merge_reproduces_every_leaf() {
             .unwrap_or_else(|| panic!("{name}: no expected residual"));
         assert_eq!(&res, want, "{name}");
     }
-    assert_eq!(known, 34);
-    assert_eq!(expected.len(), 34);
+    assert_eq!(known, 57);
+    assert_eq!(expected.len(), 57);
 }
 
 #[test]

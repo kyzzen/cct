@@ -1,3 +1,5 @@
 {"type":"cost-state","totalCost":2.5,"sessionId":"fx-session-2"}
 {"type":"zz-future-entry","foo":2,"sessionId":"fx-session-2"}
 {"type":"continued-in","sessionId":"fx-session-2","nextSessionId":"fx-session-3"}
+  {"type":"zz-future-entry","n":1.50,"n":1e2,"big":123456789012345678901234567890,"zzÜ":"✓"}  
+{"type":"cost-state","sessionId":42}

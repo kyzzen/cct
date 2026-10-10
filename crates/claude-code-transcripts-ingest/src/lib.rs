@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod cost_decomp;
 pub mod extract;
+pub mod extras;
 pub mod fork_schema;
 pub mod info;
 pub mod parse;
