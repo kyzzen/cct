@@ -55,5 +55,19 @@
 {"line":56,"residual":{"attachment":{"type":"thinking_drop","model":7,"requestId":null,"querySource":["fx"],"thinkingBlocksSent":"4","thinkingTurnsSent":2.5,"newlyDropped":"fx-not-an-object"}}},
 {"line":57,"residual":{"attachment":{"type":"prompt_snapshot","model":7,"systemPrompt":null,"tools":"fx tools as text","echoWireToolInputs":false}}},
 {"line":58,"residual":{"attachment":{"type":"zz_future_type","foo":2},"rendered":[{"content":"fx rendered three"}],"renderedRole":"system"}},
-{"line":59,"residual":{"renderedRole":"user"}}
+{"line":59,"residual":{"renderedRole":"user"}},
+{"line":60,"residual":null},
+{"line":61,"residual":null},
+{"line":62,"residual":{"attachment":{"isInitial":null}}},
+{"line":63,"residual":null},
+{"line":64,"residual":null},
+{"line":65,"residual":null},
+{"line":66,"residual":null},
+{"line":67,"residual":null},
+{"line":68,"residual":null},
+{"line":69,"residual":null},
+{"line":70,"residual":null},
+{"line":71,"residual":null},
+{"line":72,"residual":null},
+{"line":73,"residual":null}
 ]

@@ -93,9 +93,9 @@ fn check_passes_on_every_fixture_line() {
         .expect("catch-all line");
     assert_eq!(
         lines[at],
-        "Catch-all:    rows=38  unparsed_lines=7  reserialize_errors=0"
+        "Catch-all:    rows=49  unparsed_lines=7  reserialize_errors=0"
     );
-    assert_eq!(lines[at + 1], "Catch-all places (top 20 of 37 by bytes):");
+    assert_eq!(lines[at + 1], "Catch-all places (top 20 of 48 by bytes):");
     let listed: Vec<&String> = lines[at + 2..]
         .iter()
         .take_while(|line| line.starts_with("  - "))
@@ -129,7 +129,7 @@ fn check_passes_on_every_fixture_line() {
         String::from_utf8_lossy(&version.stdout),
         format!("cct {}\n", meta(&conn, "cct_version"))
     );
-    assert_eq!(meta(&conn, "lines_read"), "64");
+    assert_eq!(meta(&conn, "lines_read"), "78");
 }
 
 #[test]
@@ -174,6 +174,41 @@ fn dropped_nested_place_exits_3() {
     assert!(lines
         .iter()
         .all(|line| !line.starts_with("error: parse failure in")));
+}
+
+/// A place that stays in the catch-all although the typed parser reads it is
+/// held by nothing else the check sees: dropping it is a violation, on the
+/// first fixture line that holds the place.
+#[test]
+fn dropped_kept_place_exits_3() {
+    let tmp = TempDir::new().expect("tempdir");
+    for (place, first_line) in [
+        ("attachment.addedTypes", 60),
+        ("attachment.showConcurrencyNote", 60),
+        ("attachment.blockingError", 63),
+        ("attachment.imagePasteIds", 67),
+        ("attachment.prompt", 67),
+        ("attachment.content", 72),
+    ] {
+        let db = tmp.path().join(format!("{place}.duckdb"));
+        let output = ingest(
+            &db,
+            &[
+                ("CCT_VERIFY_RESIDUAL", "1"),
+                ("CCT_VERIFY_DROP_PATH", place),
+            ],
+        );
+        let lines = stderr_lines(&output);
+        assert_eq!(output.status.code(), Some(3), "{place}: {lines:#?}");
+        let expected = format!(
+            "error: residual invariant violated in {}:{first_line}",
+            fixture_dir().join("catch_all.jsonl").display()
+        );
+        assert_eq!(violations(&lines), vec![&expected], "{place}");
+        assert!(lines
+            .iter()
+            .all(|line| !line.starts_with("error: parse failure in")));
+    }
 }
 
 /// The switches change nothing unless the check itself is on: a drop path

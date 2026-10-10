@@ -54,7 +54,7 @@ fn catch_all_fixture_ingests() {
     let summary = run_ingest(args).expect("ingest succeeds");
 
     let known = known_line_numbers();
-    assert_eq!(known.len(), 57, "fixture: lines of known type");
+    assert_eq!(known.len(), 71, "fixture: lines of known type");
 
     let conn = Connection::open(&db_path).expect("open db");
 
@@ -77,7 +77,7 @@ fn catch_all_fixture_ingests() {
         .collect();
     let expected_by_type: BTreeMap<String, i64> = [
         ("assistant", 14),
-        ("attachment", 14),
+        ("attachment", 28),
         ("mode", 2),
         ("system", 3),
         ("user", 24),
@@ -97,7 +97,7 @@ fn catch_all_fixture_ingests() {
         .collect();
     assert_eq!(transcripts.len(), 1, "transcripts: {transcripts:?}");
     assert!(transcripts[0].0.ends_with("catch_all.jsonl"));
-    assert_eq!(transcripts[0].1, 57);
+    assert_eq!(transcripts[0].1, 71);
 
     let file_paths: i64 = conn
         .query_row("SELECT COUNT(DISTINCT file_path) FROM entries", [], |r| {
@@ -133,6 +133,20 @@ fn catch_all_fixture_ingests() {
         (57, "unknown"),
         (58, "unknown"),
         (59, "date_change"),
+        (60, "agent_listing_delta"),
+        (61, "agent_listing_delta"),
+        (62, "agent_listing_delta"),
+        (63, "hook_blocking_error"),
+        (64, "hook_non_blocking_error"),
+        (65, "hook_success"),
+        (66, "hook_cancelled"),
+        (67, "queued_command"),
+        (68, "queued_command"),
+        (69, "queued_command"),
+        (70, "queued_command"),
+        (71, "hook_additional_context"),
+        (72, "hook_additional_context"),
+        (73, "hook_additional_context"),
     ]
     .into_iter()
     .map(|(line, ty)| (line, ty.to_string()))
@@ -155,6 +169,7 @@ fn catch_all_fixture_ingests() {
     assert_eq!(unknown_variants, expected_variants);
 
     fork_tables_exist(&conn);
+    upstream_rows_of_kept_places(&conn);
 
     let raw = fixture_lines();
     catch_all_rows(&conn, &raw);
@@ -162,6 +177,192 @@ fn catch_all_fixture_ingests() {
     nothing_is_lost(&conn, &raw);
     unparsed_rows(&conn, &transcripts[0].0);
     drift_and_meta(&conn, &raw);
+}
+
+/// The tables the fork adds; every other relation in the database is upstream's.
+const FORK_TABLES: [&str; 12] = [
+    "entry_extras",
+    "unparsed_lines",
+    "attachment_raw_types",
+    "assistant_turn_fields",
+    "assistant_input_transformations",
+    "user_turn_fields",
+    "user_classifier_contexts",
+    "attachment_rendered",
+    "attachment_thinking_drops",
+    "attachment_prompt_snapshots",
+    "ingest_drift",
+    "ingest_meta",
+];
+
+/// A line that keeps a place in `entry_extras` although the typed parser
+/// reads it keeps its upstream row as upstream writes it: the columns of
+/// `attachment_entries` that are not NULL, for every such fixture line and
+/// its neighbours that keep nothing.
+fn upstream_rows_of_kept_places(conn: &Connection) {
+    let seen: Vec<(i64, Value)> = query(
+        conn,
+        "SELECT e.line_no, to_json(a)::VARCHAR \
+         FROM attachment_entries a JOIN entries e USING (entry_id) \
+         WHERE e.line_no >= 60 ORDER BY e.line_no",
+    )
+    .into_iter()
+    .map(|row| {
+        let Some(Value::Object(columns)) = parsed(&row[1]) else {
+            panic!("attachment_entries row of line {}", row[0]);
+        };
+        let filled: Map<String, Value> = columns
+            .into_iter()
+            .filter(|(name, cell)| name != "entry_id" && !cell.is_null())
+            .collect();
+        (row[0].parse().unwrap(), Value::Object(filled))
+    })
+    .collect();
+    let hook = |n: i64, ty: &str| {
+        json!({
+            "attachment_type": ty,
+            "hook_name": format!("FxHook:{n}"),
+            "tool_use_id": format!("fx-tool-use-{n}"),
+            "hook_event": "FxEvent",
+        })
+    };
+    let with = |mut row: Value, more: Value| {
+        for (name, cell) in more.as_object().expect("object") {
+            row[name.as_str()] = cell.clone();
+        }
+        row
+    };
+    let expected = vec![
+        // Upstream fills no column for this type but the type itself.
+        (60, json!({ "attachment_type": "agent_listing_delta" })),
+        (61, json!({ "attachment_type": "agent_listing_delta" })),
+        (62, json!({ "attachment_type": "agent_listing_delta" })),
+        (
+            63,
+            with(
+                hook(63, "hook_blocking_error"),
+                json!({
+                    "hook_content": "fx hook content 63",
+                    "hook_stdout": "fx stdout 63",
+                    "hook_stderr": "fx stderr 63",
+                    "hook_exit_code": 2,
+                    "hook_command": "fx-hook --run",
+                    "hook_duration_ms": 63,
+                }),
+            ),
+        ),
+        (
+            64,
+            with(
+                hook(64, "hook_non_blocking_error"),
+                json!({ "hook_stderr": "fx stderr 64", "hook_exit_code": 1 }),
+            ),
+        ),
+        (
+            65,
+            with(
+                hook(65, "hook_success"),
+                json!({
+                    "hook_stdout": "fx stdout 65",
+                    "hook_exit_code": 0,
+                    "hook_command": "fx-hook --run",
+                    "hook_duration_ms": 65,
+                }),
+            ),
+        ),
+        (
+            66,
+            with(
+                hook(66, "hook_cancelled"),
+                json!({ "hook_command": "fx-hook --run" }),
+            ),
+        ),
+        // A list prompt is written as its text parts, with a placeholder for
+        // a part that is not text.
+        (
+            67,
+            json!({
+                "attachment_type": "queued_command",
+                "queued_command_prompt": "fx queued text 67\n[image]",
+                "queued_command_mode": "prompt",
+            }),
+        ),
+        (
+            68,
+            json!({
+                "attachment_type": "queued_command",
+                "queued_command_prompt": "fx queued text 68",
+                "queued_command_mode": "prompt",
+            }),
+        ),
+        (
+            69,
+            json!({
+                "attachment_type": "queued_command",
+                "queued_command_prompt": "fx queued text 69",
+            }),
+        ),
+        (
+            70,
+            json!({ "attachment_type": "queued_command", "queued_command_prompt": "" }),
+        ),
+        // The context list is written joined by newlines.
+        (
+            71,
+            with(
+                hook(71, "hook_additional_context"),
+                json!({ "hook_content": "fx context 71" }),
+            ),
+        ),
+        (
+            72,
+            with(
+                hook(72, "hook_additional_context"),
+                json!({ "hook_content": "fx context 72 a\nfx context 72 b\nsecond line" }),
+            ),
+        ),
+        (
+            73,
+            with(
+                hook(73, "hook_additional_context"),
+                json!({ "hook_content": "" }),
+            ),
+        ),
+    ];
+    assert_eq!(seen, expected);
+
+    // With `CCT_TEST_DUMP_UPSTREAM=<file>` every row of every upstream
+    // relation is also written to that file, so that two builds can be
+    // compared on this fixture. `transcripts.ingested_at` is the time of the
+    // run and is left out.
+    if let Ok(path) = std::env::var("CCT_TEST_DUMP_UPSTREAM") {
+        let relations = query(
+            conn,
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'main' ORDER BY table_name",
+        );
+        let mut dump = String::new();
+        for relation in relations.iter().map(|row| row[0].as_str()) {
+            if FORK_TABLES.contains(&relation) {
+                continue;
+            }
+            let columns = if relation == "transcripts" {
+                "* EXCLUDE (ingested_at)"
+            } else {
+                "*"
+            };
+            let sql = format!(
+                "SELECT to_json(t)::VARCHAR AS row FROM (SELECT {columns} FROM \"{relation}\") t \
+                 ORDER BY row"
+            );
+            let rows = query(conn, &sql);
+            dump.push_str(&format!("# {relation}: {} rows\n", rows.len()));
+            for row in rows {
+                dump.push_str(&format!("{relation}\t{}\n", row[0]));
+            }
+        }
+        fs::write(&path, dump).unwrap_or_else(|e| panic!("write {path}: {e}"));
+    }
 }
 
 /// Every cell of a query result as text; SQL NULL reads `NULL`.
@@ -439,6 +640,68 @@ fn expected_extras(raw: &BTreeMap<i64, Value>) -> BTreeMap<i64, Value> {
         want.insert(n, keep(line(n), &["serverClassifierContext"]));
     }
     want.insert(55, keep(line(55), &["renderedRole"]));
+
+    // Places the typed parser reads and upstream writes to no column stay,
+    // whole, although the round trip reproduces them. Lines 65, 68 and 71
+    // hold none and have no row.
+    let members =
+        |n: i64, keys: &[&str]| json!({ "attachment": keep(&line(n)["attachment"], keys) });
+    // Every member of an agent listing delta: empty lists and `false`
+    // included, a raw null as null, an absent key not at all.
+    let delta = [
+        "addedTypes",
+        "addedLines",
+        "removedTypes",
+        "isInitial",
+        "showConcurrencyNote",
+    ];
+    want.insert(60, members(60, &delta));
+    want.insert(
+        61,
+        json!({ "attachment": {
+            "addedTypes": [],
+            "addedLines": [],
+            "removedTypes": [],
+            "isInitial": false,
+            "showConcurrencyNote": false,
+        } }),
+    );
+    want.insert(
+        62,
+        json!({ "attachment": {
+            "addedTypes": ["fx-agent-c"],
+            "addedLines": ["- fx-agent-c: synthetic line"],
+            "removedTypes": [],
+            "isInitial": null,
+        } }),
+    );
+    // `blockingError` on a hook result of any type, an empty object included.
+    for n in [63, 64] {
+        want.insert(n, members(n, &["blockingError"]));
+        assert_eq!(
+            want[&n]["attachment"]["blockingError"],
+            json!({ "blockingError": "fx blocked: synthetic reason", "command": "fx-hook --check" })
+        );
+    }
+    want.insert(66, json!({ "attachment": { "blockingError": {} } }));
+    // A queued command: the pasted-image ids whenever they are there, the
+    // prompt when it is a list (its image part is not in the column).
+    want.insert(67, members(67, &["prompt", "imagePasteIds"]));
+    assert_eq!(
+        want[&67]["attachment"]["prompt"][1]["source"]["data"],
+        json!("ZngtaW1hZ2UtNjc=")
+    );
+    want.insert(69, json!({ "attachment": { "imagePasteIds": [] } }));
+    want.insert(70, json!({ "attachment": { "prompt": [] } }));
+    // Hook context: a list that the joined column cannot give back, which is
+    // every list but one of a single element.
+    want.insert(
+        72,
+        json!({ "attachment": {
+            "content": ["fx context 72 a", "fx context 72 b\nsecond line"],
+        } }),
+    );
+    want.insert(73, json!({ "attachment": { "content": [] } }));
     want
 }
 
@@ -453,7 +716,7 @@ fn catch_all_rows(conn: &Connection, raw: &BTreeMap<i64, Value>) {
     .map(|row| (row[0].parse().unwrap(), parsed(&row[1]).expect("extra")))
     .collect();
     let want = expected_extras(raw);
-    assert_eq!(want.len(), 38);
+    assert_eq!(want.len(), 49);
     for n in raw.keys() {
         assert_eq!(extras.get(n), want.get(n), "entry_extras of line {n}");
     }
@@ -463,7 +726,7 @@ fn catch_all_rows(conn: &Connection, raw: &BTreeMap<i64, Value>) {
         conn,
         "SELECT COUNT(*), COUNT(DISTINCT entry_id) FROM entry_extras",
     );
-    assert_eq!(rows, table(&[&["38", "38"]]));
+    assert_eq!(rows, table(&[&["49", "49"]]));
     assert!(extras.values().all(|extra| extra != &json!({})));
 
     // The real type name of every attachment row written as `unknown`.
@@ -884,7 +1147,7 @@ fn nothing_is_lost(conn: &Connection, raw: &BTreeMap<i64, Value>) {
             "line {n} is not reproduced from the database"
         );
     }
-    assert_eq!(checked, 57);
+    assert_eq!(checked, 71);
 }
 
 /// The trimmed text of the lines of a fixture file whose `type` the parser
@@ -1014,8 +1277,71 @@ fn drift_and_meta(conn: &Connection, raw: &BTreeMap<i64, Value>) {
         &["assistant", "", "serverClassifierRequest", "1"],
         &["assistant", "", "thinkingDurationMs", "4"],
         &["assistant", "", "wireToolInputs", "1"],
+        // Places kept although the typed parser reads them: under the real
+        // attachment type, one row per place.
+        &[
+            "attachment",
+            "agent_listing_delta",
+            "attachment.addedLines",
+            "3",
+        ],
+        &[
+            "attachment",
+            "agent_listing_delta",
+            "attachment.addedTypes",
+            "3",
+        ],
+        &[
+            "attachment",
+            "agent_listing_delta",
+            "attachment.isInitial",
+            "3",
+        ],
+        &[
+            "attachment",
+            "agent_listing_delta",
+            "attachment.removedTypes",
+            "3",
+        ],
+        &[
+            "attachment",
+            "agent_listing_delta",
+            "attachment.showConcurrencyNote",
+            "2",
+        ],
         &["attachment", "date_change", "attachment.toolUseID", "1"],
         &["attachment", "date_change", "renderedRole", "1"],
+        &[
+            "attachment",
+            "hook_additional_context",
+            "attachment.content",
+            "2",
+        ],
+        &[
+            "attachment",
+            "hook_blocking_error",
+            "attachment.blockingError",
+            "1",
+        ],
+        &[
+            "attachment",
+            "hook_cancelled",
+            "attachment.blockingError",
+            "1",
+        ],
+        &[
+            "attachment",
+            "hook_non_blocking_error",
+            "attachment.blockingError",
+            "1",
+        ],
+        &[
+            "attachment",
+            "queued_command",
+            "attachment.imagePasteIds",
+            "2",
+        ],
+        &["attachment", "queued_command", "attachment.prompt", "2"],
         // An attachment type the parser does not know: one row under its
         // real name, with the path `attachment`.
         &["attachment", "zz_empty_type", "attachment", "1"],
@@ -1075,6 +1401,33 @@ fn drift_and_meta(conn: &Connection, raw: &BTreeMap<i64, Value>) {
         "\"nested\"".len() + "\"toplevel\"".len()
     );
     assert_eq!(bytes_of("user", "", "zzNull"), "null".len());
+    let kept = |ns: &[i64], key: &str| -> usize {
+        ns.iter().map(|n| len(&raw[n]["attachment"][key])).sum()
+    };
+    assert_eq!(
+        bytes_of("attachment", "agent_listing_delta", "attachment.addedTypes"),
+        kept(&[60, 61, 62], "addedTypes")
+    );
+    assert_eq!(
+        bytes_of("attachment", "agent_listing_delta", "attachment.isInitial"),
+        "true".len() + "false".len() + "null".len()
+    );
+    assert_eq!(
+        bytes_of("attachment", "hook_cancelled", "attachment.blockingError"),
+        "{}".len()
+    );
+    assert_eq!(
+        bytes_of("attachment", "queued_command", "attachment.prompt"),
+        kept(&[67], "prompt") + "[]".len()
+    );
+    assert_eq!(
+        bytes_of(
+            "attachment",
+            "hook_additional_context",
+            "attachment.content"
+        ),
+        kept(&[72], "content") + "[]".len()
+    );
     assert_eq!(bytes_of("user", "", "zzÜñí"), len(&raw[&32]["zzÜñí"]));
     let line_bytes = |ty: &str| -> usize {
         ["catch_all.jsonl", "unknown_only.jsonl"]
@@ -1099,9 +1452,9 @@ fn drift_and_meta(conn: &Connection, raw: &BTreeMap<i64, Value>) {
     assert!(!build_number.is_empty() && build_number.bytes().all(|b| b.is_ascii_digit()));
     let expected = vec![
         vec!["cct_version".to_string(), cct_version.clone()],
-        vec!["entries".to_string(), "57".to_string()],
-        vec!["extras_rows".to_string(), "38".to_string()],
-        vec!["lines_read".to_string(), "64".to_string()],
+        vec!["entries".to_string(), "71".to_string()],
+        vec!["extras_rows".to_string(), "49".to_string()],
+        vec!["lines_read".to_string(), "78".to_string()],
         vec!["reserialize_errors".to_string(), "0".to_string()],
         vec!["unparsed_lines".to_string(), "7".to_string()],
         vec![
@@ -1116,5 +1469,5 @@ fn drift_and_meta(conn: &Connection, raw: &BTreeMap<i64, Value>) {
         "SELECT (SELECT COUNT(*) FROM entries), (SELECT COUNT(*) FROM entry_extras), \
                 (SELECT COUNT(*) FROM unparsed_lines)",
     );
-    assert_eq!(counts, table(&[&["57", "38", "7"]]));
+    assert_eq!(counts, table(&[&["71", "49", "7"]]));
 }
