@@ -38,6 +38,20 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Number, Value};
 
+/// Why the walk stored a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoreReason {
+    /// The round trip lacks the key.
+    MissingKey,
+    /// The round trip holds a unit fallback there: an object with no key but
+    /// `type`, and another `type`.
+    Fallback,
+    /// Both sides hold an array, of different lengths.
+    ArrayLength,
+    /// Both sides hold a value and the two differ.
+    Differs,
+}
+
 /// A place where the walk stored a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPlace {
@@ -46,6 +60,7 @@ pub struct StoredPlace {
     pub path: String,
     /// Length in bytes of the stored value as compact JSON.
     pub bytes: usize,
+    pub reason: StoreReason,
 }
 
 #[derive(Clone, Copy)]
@@ -78,13 +93,13 @@ fn walk<'a>(
     match (raw, rt) {
         (Value::Object(a), Value::Object(b)) => {
             if is_fallback(a, b) {
-                return store(raw, path, places);
+                return store(raw, path, places, StoreReason::Fallback);
             }
             let mut out: Option<Map<String, Value>> = None;
             for (key, va) in a {
                 path.push(Seg::Key(key));
                 let child = match b.get(key) {
-                    None => store(va, path, places),
+                    None => store(va, path, places, StoreReason::MissingKey),
                     Some(vb) => walk(va, vb, path, places),
                 };
                 path.pop();
@@ -96,7 +111,7 @@ fn walk<'a>(
         }
         (Value::Array(a), Value::Array(b)) => {
             if a.len() != b.len() {
-                return store(raw, path, places);
+                return store(raw, path, places, StoreReason::ArrayLength);
             }
             let mut out: Option<Map<String, Value>> = None;
             for (i, (va, vb)) in a.iter().zip(b).enumerate() {
@@ -113,14 +128,14 @@ fn walk<'a>(
             if numbers_equal(a, b) {
                 None
             } else {
-                store(raw, path, places)
+                store(raw, path, places, StoreReason::Differs)
             }
         }
         _ => {
             if raw == rt {
                 None
             } else {
-                store(raw, path, places)
+                store(raw, path, places, StoreReason::Differs)
             }
         }
     }
@@ -136,11 +151,13 @@ fn store(
     value: &Value,
     path: &[Seg<'_>],
     places: &mut Option<&mut Vec<StoredPlace>>,
+    reason: StoreReason,
 ) -> Option<Value> {
     if let Some(places) = places.as_deref_mut() {
         places.push(StoredPlace {
             path: render(path, false),
             bytes: json_len(value),
+            reason,
         });
     }
     Some(value.clone())

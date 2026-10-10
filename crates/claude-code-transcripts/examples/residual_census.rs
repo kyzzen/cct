@@ -3,6 +3,8 @@
 //! Reads every `.jsonl` file under the input directory the way the ingest
 //! does, computes the residual of each line of a known entry type, checks
 //! that merging it back reproduces the raw line, and prints one JSON object.
+//! Each record counts the lines and bytes of one stored place of one entry
+//! type, and how many values were stored there for each reason.
 //! The output holds file paths, key names, type names and counts, never a
 //! value. Files are opened for reading only.
 //!
@@ -20,7 +22,9 @@ use rayon::prelude::*;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-use claude_code_transcripts::residual::{json_len, merge, residual_with_places, unreproduced};
+use claude_code_transcripts::residual::{
+    json_len, merge, residual_with_places, unreproduced, StoreReason,
+};
 use claude_code_transcripts::types::Entry;
 
 const MAX_LOCATIONS: usize = 20;
@@ -67,6 +71,22 @@ impl Located {
 struct Counts {
     lines: u64,
     bytes: u64,
+    /// Stored values by the reason the walk stored them.
+    missing_key: u64,
+    fallback: u64,
+    array_length: u64,
+    differs: u64,
+}
+
+impl Counts {
+    fn absorb(&mut self, other: Counts) {
+        self.lines += other.lines;
+        self.bytes += other.bytes;
+        self.missing_key += other.missing_key;
+        self.fallback += other.fallback;
+        self.array_length += other.array_length;
+        self.differs += other.differs;
+    }
 }
 
 #[derive(Default)]
@@ -110,9 +130,7 @@ impl Tally {
         self.residual_bytes += other.residual_bytes;
         self.null_only_rows += other.null_only_rows;
         for (key, counts) in other.records {
-            let mine = self.records.entry(key).or_default();
-            mine.lines += counts.lines;
-            mine.bytes += counts.bytes;
+            self.records.entry(key).or_default().absorb(counts);
         }
         self
     }
@@ -250,6 +268,12 @@ fn census_file(path: &Path, with_residual: bool, tally: &mut Tally) {
                 .entry((label.clone(), place.path.clone()))
                 .or_default();
             counts.bytes += place.bytes as u64;
+            match place.reason {
+                StoreReason::MissingKey => counts.missing_key += 1,
+                StoreReason::Fallback => counts.fallback += 1,
+                StoreReason::ArrayLength => counts.array_length += 1,
+                StoreReason::Differs => counts.differs += 1,
+            }
             if first_on_line {
                 counts.lines += 1;
             }
@@ -325,7 +349,18 @@ fn main() {
         .records
         .iter()
         .map(|((ty, place), counts)| {
-            json!({ "type": ty, "place": place, "lines": counts.lines, "bytes": counts.bytes })
+            json!({
+                "type": ty,
+                "place": place,
+                "lines": counts.lines,
+                "bytes": counts.bytes,
+                "stored": {
+                    "missing_key": counts.missing_key,
+                    "fallback": counts.fallback,
+                    "array_length": counts.array_length,
+                    "differs": counts.differs,
+                },
+            })
         })
         .collect();
 

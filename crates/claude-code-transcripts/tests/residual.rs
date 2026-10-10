@@ -13,7 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use claude_code_transcripts::residual::{
-    merge, numbers_equal, residual, residual_with_places, unreproduced, StoredPlace,
+    merge, numbers_equal, residual, residual_with_places, unreproduced, StoreReason, StoredPlace,
 };
 use claude_code_transcripts::types::Entry;
 use serde_json::{json, Value};
@@ -138,18 +138,23 @@ fn fixture_residuals_match_expected_and_merge_reproduces_every_leaf() {
 
 #[test]
 fn stored_places_use_the_diff_path_syntax() {
+    use StoreReason::{Differs, Fallback, MissingKey};
+
     let text = fs::read_to_string(catch_all_fixture()).expect("read fixture");
-    let places_of = |line_no: usize| -> Vec<(String, usize)> {
+    let places_of = |line_no: usize| -> Vec<(String, usize, StoreReason)> {
         let line = text.lines().nth(line_no - 1).expect("line");
         let raw: Value = serde_json::from_str(line).expect("json");
         let rt = round_trip(&raw).expect("known type");
         let mut places: Vec<StoredPlace> = Vec::new();
         residual_with_places(&raw, &rt, &mut places);
-        let mut out: Vec<(String, usize)> = places.into_iter().map(|p| (p.path, p.bytes)).collect();
+        let mut out: Vec<_> = places
+            .into_iter()
+            .map(|p| (p.path, p.bytes, p.reason))
+            .collect();
         out.sort();
         out
     };
-    let place = |path: &str, bytes: usize| (path.to_string(), bytes);
+    let place = |path: &str, bytes: usize, reason| (path.to_string(), bytes, reason);
 
     // One unknown block stored whole, one key inside a known block.
     assert_eq!(
@@ -157,26 +162,54 @@ fn stored_places_use_the_diff_path_syntax() {
         vec![
             place(
                 "message.content[]",
-                r#"{"payload":{"k":1},"type":"zz_block"}"#.len()
+                r#"{"payload":{"k":1},"type":"zz_block"}"#.len(),
+                Fallback
             ),
-            place("message.content[].caller.zzNew", 1),
+            place("message.content[].caller.zzNew", 1, MissingKey),
         ]
     );
     // An unknown attachment is one place, whatever its payload.
     assert_eq!(
         places_of(15),
-        vec![place("attachment", r#"{"type":"zz_empty_type"}"#.len())]
+        vec![place(
+            "attachment",
+            r#"{"type":"zz_empty_type"}"#.len(),
+            Fallback
+        )]
     );
     // A nested key and a top-level key with a dot print as the same path.
     assert_eq!(
         places_of(30),
         vec![
-            place("message.zzNew", r#""nested""#.len()),
-            place("message.zzNew", r#""toplevel""#.len()),
-            place("zz[0]", 1),
+            place("message.zzNew", r#""nested""#.len(), MissingKey),
+            place("message.zzNew", r#""toplevel""#.len(), MissingKey),
+            place("zz[0]", 1, MissingKey),
         ]
     );
+    // Values the round trip holds differently: a number beyond 2^53 read
+    // into a float field, and the real name behind an `unknown` role.
+    assert_eq!(
+        places_of(20),
+        vec![place("durationMs", "9007199254740993".len(), Differs)]
+    );
+    assert_eq!(
+        places_of(22),
+        vec![place("message.role", r#""zz_role""#.len(), Differs)]
+    );
+    // An integer read into a float field is not stored at all.
+    assert_eq!(places_of(19), vec![]);
     assert_eq!(places_of(1), vec![]);
+
+    let mut places = Vec::new();
+    residual_with_places(&json!({ "a": [1, 2] }), &json!({ "a": [1] }), &mut places);
+    assert_eq!(
+        places,
+        vec![StoredPlace {
+            path: "a".to_string(),
+            bytes: "[1,2]".len(),
+            reason: StoreReason::ArrayLength,
+        }]
+    );
 }
 
 #[test]
