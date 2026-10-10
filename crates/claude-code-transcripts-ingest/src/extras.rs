@@ -26,14 +26,18 @@
 //!
 //! Nothing here can fail a line: no function returns an error or panics, and
 //! if the typed entry cannot be serialised back the whole raw line is stored
-//! and counted.
+//! and counted. The one exception is asked for: with `CCT_VERIFY_RESIDUAL=1`
+//! every line is checked (the round trip with the promoted values, merged
+//! with the line's `extra`, must reproduce every leaf of the raw line) and a
+//! line that fails the check ends the process with exit code 3.
 
 #![deny(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 use claude_code_transcripts::residual::{
-    json_len, numbers_equal, residual_with_places, StoreReason, StoredPlace,
+    json_len, merge, numbers_equal, residual_with_places, unreproduced, StoreReason, StoredPlace,
 };
 use claude_code_transcripts::types::Entry;
 use duckdb::{params, Connection};
@@ -384,6 +388,9 @@ pub fn attach(raw: &Value, entry: &Entry, rows: &mut EntryRows, drift: &mut Drif
         round_trip
     });
     let (extra, places) = extra_of(raw, round_trip.as_ref(), drift);
+    if let (Some(verify), Some(round_trip)) = (verify(), round_trip) {
+        verify.line(raw, round_trip, extra.as_ref(), rows);
+    }
     if let Some(extra) = &extra {
         children.push(("entry_extras", vec![vec![Value::Null, json_str(extra)]]));
         drift.extras_rows += 1;
@@ -424,6 +431,63 @@ fn extra_of(
             });
             (Some(raw.clone()), places)
         }
+    }
+}
+
+// ─── Verify ──────────────────────────────────────────────────────────────
+
+/// The merge check, on when the environment holds `CCT_VERIFY_RESIDUAL=1`.
+struct Verify {
+    /// `CCT_VERIFY_DROP_PATH`: object keys, joined by dots, of one place that
+    /// is removed from a line's `extra` before the check. Read by nothing
+    /// else; it exists to show that the check can fail.
+    drop_path: Option<String>,
+}
+
+fn verify() -> Option<&'static Verify> {
+    static VERIFY: OnceLock<Option<Verify>> = OnceLock::new();
+    VERIFY
+        .get_or_init(|| {
+            let on = std::env::var("CCT_VERIFY_RESIDUAL").is_ok_and(|value| value == "1");
+            on.then(|| Verify {
+                drop_path: std::env::var("CCT_VERIFY_DROP_PATH").ok(),
+            })
+        })
+        .as_ref()
+}
+
+impl Verify {
+    /// Ends the process with exit code 3 unless merging `extra` into the
+    /// round trip reproduces every leaf of the raw line. The message is not
+    /// the parse-failure one, which callers read as "this file is bad".
+    fn line(&self, raw: &Value, round_trip: Value, extra: Option<&Value>, rows: &EntryRows) {
+        let mut stored = extra.cloned();
+        if let (Some(path), Some(stored)) = (&self.drop_path, &mut stored) {
+            drop_place(stored, path);
+        }
+        let merged = merge(round_trip, stored.as_ref());
+        if unreproduced(raw, &merged).is_empty() {
+            return;
+        }
+        let file = rows.entry.get(1).and_then(Value::as_str).unwrap_or("?");
+        let line_no = rows.entry.get(2).and_then(Value::as_i64).unwrap_or(0);
+        eprintln!("error: residual invariant violated in {file}:{line_no}");
+        std::process::exit(3);
+    }
+}
+
+/// Removes the value at `path` (object keys joined by dots) when it is there.
+fn drop_place(value: &mut Value, path: &str) {
+    let (parents, last) = match path.rsplit_once('.') {
+        Some((parents, last)) => (Some(parents), last),
+        None => (None, path),
+    };
+    let mut at = Some(value);
+    for key in parents.into_iter().flat_map(|parents| parents.split('.')) {
+        at = at.and_then(|value| value.get_mut(key));
+    }
+    if let Some(Value::Object(map)) = at {
+        map.remove(last);
     }
 }
 
