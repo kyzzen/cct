@@ -23,6 +23,8 @@ git diff --stat v0.1.12..HEAD
 | File | Kind | Change |
 |---|---|---|
 | `FORK.md` | new | This file. |
+| `crates/claude-code-transcripts-ingest/src/cli.rs` | changed, 1 line | `cct --version` prints `cct 0.1.12+corpusdb.N`: upstream's version with a fork suffix. `N` goes up for every build that is gated. `Cargo.toml` keeps upstream's version. |
+| `crates/claude-code-transcripts-ingest/src/update.rs` | changed, 8 lines added | `cct update` prints that this build does not self-update and exits 2, because an update would replace the fork binary with an upstream release. The subcommand and its help text stay. |
 | `crates/claude-code-transcripts-ingest/tests/catch_all.rs` | new | End-to-end test of the fork's behaviour on one synthetic fixture directory. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/catch_all.jsonl` | new | Synthetic fixture: one line per way a line can carry something the typed parser does not model. Lines 34 and 35 are entry types the parser does not know. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/unknown_only.jsonl` | new | Synthetic fixture: a file that holds unknown entry types only. |

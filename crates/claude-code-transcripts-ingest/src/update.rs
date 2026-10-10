@@ -14,7 +14,15 @@ fn detect_target() -> Result<&'static str, String> {
     }
 }
 
+/// A fork build is not an upstream release: updating would replace it with one.
+const SELF_UPDATE_ENABLED: bool = false;
+
 pub fn run(args: UpdateArgs) {
+    if !SELF_UPDATE_ENABLED {
+        eprintln!("error: this build of cct does not self-update; build and install a new binary from the fork instead");
+        std::process::exit(2);
+    }
+
     let target = match detect_target() {
         Ok(t) => t,
         Err(e) => {

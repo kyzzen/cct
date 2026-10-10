@@ -26,7 +26,7 @@ fn default_output_db() -> PathBuf {
 #[derive(Parser, Debug)]
 #[command(
     name = "cct",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), "+corpusdb.1"),
     about = "Claude Code transcript tools — ingest JSONL transcripts into DuckDB and serve the viewer UI"
 )]
 pub struct Cli {
