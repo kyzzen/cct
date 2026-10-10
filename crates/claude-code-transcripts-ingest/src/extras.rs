@@ -21,7 +21,8 @@
 //!
 //! [`Drift::unparsed`] builds the `unparsed_lines` row of a line whose `type`
 //! the parser does not know. [`Drift`] counts, per file and then per ingest,
-//! what went into the catch-all.
+//! what went into the catch-all; [`write_summary`] stores those counts in
+//! `ingest_drift` and `ingest_meta`, and [`Drift::report`] prints the largest.
 //!
 //! Nothing here can fail a line: no function returns an error or panics, and
 //! if the typed entry cannot be serialised back the whole raw line is stored
@@ -29,12 +30,13 @@
 
 #![deny(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use claude_code_transcripts::residual::{
     json_len, numbers_equal, residual_with_places, StoreReason, StoredPlace,
 };
 use claude_code_transcripts::types::Entry;
+use duckdb::{params, Connection};
 use serde_json::{Map, Value};
 
 use crate::parse::{json_str, EntryRows};
@@ -427,15 +429,29 @@ fn extra_of(
 
 // ─── Drift ───────────────────────────────────────────────────────────────
 
+/// Entry type, attachment type (empty when the line is not an attachment)
+/// and stored place: the key of `ingest_drift`.
+type PlaceKey = (String, String, String);
+
+/// Places `ingest_drift` keeps under their own name.
+const DRIFT_ROWS: usize = 2000;
+/// The place that collects, per entry type, what is past `DRIFT_ROWS`.
+const OTHER_PLACES: &str = "<other>";
+/// Places the stderr report lists.
+const REPORT_ROWS: usize = 20;
+
 /// Counts of what the catch-all holds: lines and bytes per entry type,
 /// attachment type and stored place, and the line counters of `ingest_meta`.
 #[derive(Default)]
 pub struct Drift {
-    /// (entry type, attachment type, place) to (lines, bytes).
-    places: HashMap<(String, String, String), (u64, u64)>,
+    /// Place to (lines, bytes). Not capped while counting; the cap is
+    /// applied when the table is written.
+    places: HashMap<PlaceKey, (u64, u64)>,
     lines_read: u64,
     extras_rows: u64,
     reserialize_errors: u64,
+    /// `unparsed_lines` rows the writer appended.
+    unparsed_rows: u64,
 }
 
 impl Drift {
@@ -487,4 +503,129 @@ impl Drift {
             self.add(entry_type, attachment_type, path, bytes);
         }
     }
+
+    /// Adds the counts of one file, and the number of its `unparsed_lines`
+    /// rows that were written.
+    pub fn absorb(&mut self, file: Drift, unparsed_rows: usize) {
+        for (key, (lines, bytes)) in file.places {
+            let slot = self.places.entry(key).or_default();
+            slot.0 += lines;
+            slot.1 += bytes;
+        }
+        self.lines_read += file.lines_read;
+        self.extras_rows += file.extras_rows;
+        self.reserialize_errors += file.reserialize_errors;
+        self.unparsed_rows += unparsed_rows as u64;
+    }
+
+    /// Every place, most bytes first; ties by entry type, attachment type
+    /// and place, so that the order does not depend on the hash map.
+    fn ranked(&self) -> Vec<(&PlaceKey, (u64, u64))> {
+        let mut rows: Vec<(&PlaceKey, (u64, u64))> = self
+            .places
+            .iter()
+            .map(|(key, counts)| (key, *counts))
+            .collect();
+        rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(b.0)));
+        rows
+    }
+
+    /// The rows of `ingest_drift`: the `DRIFT_ROWS` largest places under
+    /// their own key, the rest summed into one `<other>` row per entry type.
+    /// Keyed by the table's key, so a real place spelled `<other>` shares
+    /// that row instead of repeating the key.
+    fn capped(&self) -> BTreeMap<PlaceKey, (u64, u64)> {
+        let mut rows: BTreeMap<PlaceKey, (u64, u64)> = BTreeMap::new();
+        for (rank, (key, (lines, bytes))) in self.ranked().into_iter().enumerate() {
+            let key = if rank < DRIFT_ROWS {
+                key.clone()
+            } else {
+                (key.0.clone(), String::new(), OTHER_PLACES.to_owned())
+            };
+            let slot = rows.entry(key).or_default();
+            slot.0 += lines;
+            slot.1 += bytes;
+        }
+        rows
+    }
+
+    /// Prints the catch-all counters and its largest places to stderr.
+    pub fn report(&self) {
+        eprintln!(
+            "Catch-all:    rows={}  unparsed_lines={}  reserialize_errors={}",
+            self.extras_rows, self.unparsed_rows, self.reserialize_errors
+        );
+        let ranked = self.ranked();
+        if ranked.is_empty() {
+            return;
+        }
+        eprintln!(
+            "Catch-all places (top {} of {} by bytes):",
+            ranked.len().min(REPORT_ROWS),
+            ranked.len()
+        );
+        for ((entry_type, attachment_type, path), (lines, bytes)) in
+            ranked.into_iter().take(REPORT_ROWS)
+        {
+            let separator = if attachment_type.is_empty() { "" } else { "/" };
+            eprintln!(
+                "  - {entry_type}{separator}{attachment_type}  {path}  (lines={lines}, bytes={bytes})"
+            );
+        }
+    }
+}
+
+fn bigint(count: u64) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// Fills `ingest_drift` and `ingest_meta` once the load is committed.
+/// `entries` is the number of `entries` rows the writer appended.
+pub fn write_summary(conn: &Connection, drift: &Drift, entries: i64) -> Result<(), String> {
+    conn.execute_batch("BEGIN TRANSACTION")
+        .map_err(|e| format!("begin ingest summary: {e}"))?;
+    {
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO ingest_drift (entry_type, attachment_type, path, lines, bytes)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .map_err(|e| format!("prep ingest_drift: {e}"))?;
+        for ((entry_type, attachment_type, path), (lines, bytes)) in drift.capped() {
+            stmt.execute(params![
+                entry_type,
+                attachment_type,
+                path,
+                bigint(lines),
+                bigint(bytes)
+            ])
+            .map_err(|e| format!("insert ingest_drift: {e}"))?;
+        }
+
+        let command = <crate::cli::Cli as clap::CommandFactory>::command();
+        let meta = [
+            (
+                "cct_version",
+                command.get_version().unwrap_or("").to_owned(),
+            ),
+            (
+                "upstream_tag",
+                concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
+            ),
+            ("lines_read", drift.lines_read.to_string()),
+            ("entries", entries.to_string()),
+            ("extras_rows", drift.extras_rows.to_string()),
+            ("unparsed_lines", drift.unparsed_rows.to_string()),
+            ("reserialize_errors", drift.reserialize_errors.to_string()),
+        ];
+        let mut stmt = conn
+            .prepare("INSERT INTO ingest_meta (key, value) VALUES (?, ?)")
+            .map_err(|e| format!("prep ingest_meta: {e}"))?;
+        for (key, value) in meta {
+            stmt.execute(params![key, value])
+                .map_err(|e| format!("insert ingest_meta: {e}"))?;
+        }
+    }
+    conn.execute_batch("COMMIT")
+        .map_err(|e| format!("commit ingest summary: {e}"))
 }

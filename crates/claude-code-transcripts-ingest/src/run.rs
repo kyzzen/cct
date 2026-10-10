@@ -109,6 +109,7 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
     let pricing_arc = Arc::new(build_lookup(&rows));
 
     let mut next_id: i64 = 1;
+    let mut drift = crate::extras::Drift::default();
 
     let (tx, rx) = bounded::<ParsedFile>(jobs * 2);
 
@@ -152,7 +153,7 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
                 }
                 die(format!("parse failure in {}", parsed.transcript.file_path));
             }
-            if parsed.entries.is_empty() {
+            if parsed.entries.is_empty() && parsed.unparsed.is_empty() {
                 return;
             }
             let _ = tx.send(parsed);
@@ -186,6 +187,15 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
                 for v in &parsed.unknown_variants {
                     *g.entry(v.clone()).or_insert(0) += 1;
                 }
+            }
+
+            for row in &parsed.unparsed {
+                let app = get_or_open(&mut variant_apps, &tx, "unparsed_lines");
+                append_row(app, row, &[]).map_err(|m| format!("insert unparsed line: {m}"))?;
+            }
+            drift.absorb(parsed.drift, parsed.unparsed.len());
+            if parsed.entries.is_empty() {
+                continue;
             }
 
             let t = &parsed.transcript;
@@ -240,6 +250,7 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
         // Appenders + prepared statement drop here, flushing before commit.
     }
     tx.commit().map_err(|e| format!("commit: {e}"))?;
+    crate::extras::write_summary(&conn, &drift, next_id - 1)?;
 
     parser_handle
         .join()
@@ -294,6 +305,7 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
             eprintln!("  - {k}  (count={})", unknown_vars[k]);
         }
     }
+    drift.report();
     let elapsed = started.elapsed();
     let h = elapsed.as_secs() / 3600;
     let m = (elapsed.as_secs() % 3600) / 60;

@@ -160,6 +160,8 @@ fn catch_all_fixture_ingests() {
     catch_all_rows(&conn, &raw);
     typed_rows(&conn, &raw);
     nothing_is_lost(&conn, &raw);
+    unparsed_rows(&conn, &transcripts[0].0);
+    drift_and_meta(&conn, &raw);
 }
 
 /// Every cell of a query result as text; SQL NULL reads `NULL`.
@@ -883,4 +885,236 @@ fn nothing_is_lost(conn: &Connection, raw: &BTreeMap<i64, Value>) {
         );
     }
     assert_eq!(checked, 57);
+}
+
+/// The trimmed text of the lines of a fixture file whose `type` the parser
+/// does not know, by line number.
+fn unknown_lines(file: &str) -> Vec<(i64, String)> {
+    let text = fs::read_to_string(fixture_dir().join(file)).expect("read fixture");
+    text.lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let value: Value = serde_json::from_str(line).expect("fixture line is json");
+            let ty = value.get("type").and_then(|t| t.as_str()).expect("type");
+            UNKNOWN_ENTRY_TYPES
+                .contains(&ty)
+                .then(|| (idx as i64 + 1, line.trim().to_string()))
+        })
+        .collect()
+}
+
+/// `unparsed_lines`: one row per line of an unknown type, in both files. The
+/// file that holds nothing else has rows here and no `transcripts` row.
+fn unparsed_rows(conn: &Connection, main_file_path: &str) {
+    let rows = query(
+        conn,
+        "SELECT regexp_extract(file_path, '[^/]+$'), line_no, raw_type, session_id, payload \
+         FROM unparsed_lines ORDER BY 1, 2",
+    );
+    let main = unknown_lines("catch_all.jsonl");
+    let only = unknown_lines("unknown_only.jsonl");
+    assert_eq!(main.len(), 2);
+    assert_eq!(only.len(), 5);
+    let text_of = |lines: &[(i64, String)], n: i64| -> String {
+        lines
+            .iter()
+            .find(|(line_no, _)| *line_no == n)
+            .map(|(_, text)| text.clone())
+            .unwrap_or_else(|| panic!("no unknown line {n}"))
+    };
+    let expected: Vec<Vec<String>> = vec![
+        vec![
+            "catch_all.jsonl".into(),
+            "34".into(),
+            "cost-state".into(),
+            "fx-session".into(),
+            text_of(&main, 34),
+        ],
+        vec![
+            "catch_all.jsonl".into(),
+            "35".into(),
+            "zz-future-entry".into(),
+            "fx-session".into(),
+            text_of(&main, 35),
+        ],
+        vec![
+            "unknown_only.jsonl".into(),
+            "1".into(),
+            "cost-state".into(),
+            "fx-session-2".into(),
+            text_of(&only, 1),
+        ],
+        vec![
+            "unknown_only.jsonl".into(),
+            "2".into(),
+            "zz-future-entry".into(),
+            "fx-session-2".into(),
+            text_of(&only, 2),
+        ],
+        vec![
+            "unknown_only.jsonl".into(),
+            "3".into(),
+            "continued-in".into(),
+            "fx-session-2".into(),
+            text_of(&only, 3),
+        ],
+        // No `sessionId`; the payload keeps the repeated key and the
+        // spelling of the numbers, without the spaces around the line.
+        vec![
+            "unknown_only.jsonl".into(),
+            "4".into(),
+            "zz-future-entry".into(),
+            "NULL".into(),
+            "{\"type\":\"zz-future-entry\",\"n\":1.50,\"n\":1e2,\
+             \"big\":123456789012345678901234567890,\"zzÜ\":\"✓\"}"
+                .into(),
+        ],
+        // A `sessionId` that is not a string.
+        vec![
+            "unknown_only.jsonl".into(),
+            "5".into(),
+            "cost-state".into(),
+            "NULL".into(),
+            text_of(&only, 5),
+        ],
+    ];
+    assert_eq!(rows, expected);
+
+    // The rows of the main file carry the path its `transcripts` row carries.
+    let paths = query(
+        conn,
+        "SELECT DISTINCT file_path FROM unparsed_lines WHERE file_path LIKE '%catch_all.jsonl'",
+    );
+    assert_eq!(paths, vec![vec![main_file_path.to_string()]]);
+    let files = query(
+        conn,
+        "SELECT COUNT(DISTINCT u.file_path), COUNT(DISTINCT t.file_path) \
+         FROM unparsed_lines u LEFT JOIN transcripts t USING (file_path)",
+    );
+    assert_eq!(files, table(&[&["2", "1"]]));
+}
+
+/// `ingest_drift` (what sits in the catch-all, by entry type and place) and
+/// `ingest_meta`.
+fn drift_and_meta(conn: &Connection, raw: &BTreeMap<i64, Value>) {
+    let drift = query(
+        conn,
+        "SELECT entry_type, attachment_type, path, lines, bytes FROM ingest_drift \
+         ORDER BY entry_type, attachment_type, path",
+    );
+    let places: Vec<Vec<String>> = drift.iter().map(|row| row[..4].to_vec()).collect();
+    let expected = table(&[
+        &["assistant", "", "advisorModel", "1"],
+        &["assistant", "", "apiBlockIndex", "1"],
+        &["assistant", "", "message.content[]", "1"],
+        &["assistant", "", "message.content[].caller.zzNew", "1"],
+        &["assistant", "", "message.input_transformations", "5"],
+        &["assistant", "", "message.role", "1"],
+        &["assistant", "", "perTurnEffort", "1"],
+        &["assistant", "", "serverClassifierRequest", "1"],
+        &["assistant", "", "thinkingDurationMs", "4"],
+        &["assistant", "", "wireToolInputs", "1"],
+        &["attachment", "date_change", "attachment.toolUseID", "1"],
+        &["attachment", "date_change", "renderedRole", "1"],
+        // An attachment type the parser does not know: one row under its
+        // real name, with the path `attachment`.
+        &["attachment", "zz_empty_type", "attachment", "1"],
+        &["attachment", "zz_future_type", "attachment", "2"],
+        // One row per unknown entry type, both files together.
+        &["continued-in", "", "(line)", "1"],
+        &["cost-state", "", "(line)", "3"],
+        &["mode", "", "mode", "1"],
+        &["mode", "", "zzNew", "1"],
+        &["system", "", "durationMs", "1"],
+        &["system", "", "subtype", "1"],
+        &["user", "", "cwd", "1"],
+        &["user", "", "gitBranch", "1"],
+        &["user", "", "message.content[]", "1"],
+        &["user", "", "message.content[].source", "2"],
+        &["user", "", "message.role", "1"],
+        // Two values on one line that print as the same place: one line.
+        &["user", "", "message.zzNew", "1"],
+        &["user", "", "serverClassifierContext", "3"],
+        &["user", "", "turnOrigin", "1"],
+        &["user", "", "turnPosition", "4"],
+        &["user", "", "zz.dotted", "1"],
+        &["user", "", "zzBig", "1"],
+        &["user", "", "zzDeep", "1"],
+        &["user", "", "zzFloat", "1"],
+        &["user", "", "zzNull", "1"],
+        &["user", "", "zz[0]", "1"],
+        &["user", "", "zzÜñí", "1"],
+        &["zz-future-entry", "", "(line)", "3"],
+    ]);
+    assert_eq!(places, expected);
+
+    // Bytes are the length of each stored value as compact JSON, or of the
+    // line text for an unknown entry type.
+    let bytes_of = |entry_type: &str, attachment_type: &str, path: &str| -> usize {
+        drift
+            .iter()
+            .find(|row| row[0] == entry_type && row[1] == attachment_type && row[2] == path)
+            .map(|row| row[4].parse().unwrap())
+            .unwrap_or_else(|| panic!("no drift row {entry_type} {path}"))
+    };
+    let len = |value: &Value| serde_json::to_string(value).unwrap().len();
+    let lists: usize = [3, 40, 41, 43, 45]
+        .iter()
+        .map(|n| len(&raw[n]["message"]["input_transformations"]))
+        .sum();
+    assert_eq!(
+        bytes_of("assistant", "", "message.input_transformations"),
+        lists
+    );
+    assert_eq!(
+        bytes_of("attachment", "zz_future_type", "attachment"),
+        len(&raw[&14]["attachment"]) + len(&raw[&58]["attachment"])
+    );
+    assert_eq!(
+        bytes_of("user", "", "message.zzNew"),
+        "\"nested\"".len() + "\"toplevel\"".len()
+    );
+    assert_eq!(bytes_of("user", "", "zzNull"), "null".len());
+    assert_eq!(bytes_of("user", "", "zzÜñí"), len(&raw[&32]["zzÜñí"]));
+    let line_bytes = |ty: &str| -> usize {
+        ["catch_all.jsonl", "unknown_only.jsonl"]
+            .iter()
+            .flat_map(|file| unknown_lines(file))
+            .filter(|(_, text)| text.starts_with(&format!("{{\"type\":\"{ty}\"")))
+            .map(|(_, text)| text.len())
+            .sum()
+    };
+    for ty in UNKNOWN_ENTRY_TYPES {
+        assert_eq!(bytes_of(ty, "", "(line)"), line_bytes(ty), "{ty}");
+    }
+
+    let meta = query(conn, "SELECT key, value FROM ingest_meta ORDER BY key");
+    let version = concat!(env!("CARGO_PKG_VERSION"), "+corpusdb.");
+    let cct_version = meta
+        .iter()
+        .find(|row| row[0] == "cct_version")
+        .map(|row| row[1].clone())
+        .expect("cct_version");
+    let build_number = cct_version.strip_prefix(version).expect("fork version");
+    assert!(!build_number.is_empty() && build_number.bytes().all(|b| b.is_ascii_digit()));
+    let expected = vec![
+        vec!["cct_version".to_string(), cct_version.clone()],
+        vec!["entries".to_string(), "57".to_string()],
+        vec!["extras_rows".to_string(), "38".to_string()],
+        vec!["lines_read".to_string(), "64".to_string()],
+        vec!["reserialize_errors".to_string(), "0".to_string()],
+        vec!["unparsed_lines".to_string(), "7".to_string()],
+        vec![
+            "upstream_tag".to_string(),
+            concat!("v", env!("CARGO_PKG_VERSION")).to_string(),
+        ],
+    ];
+    assert_eq!(meta, expected);
+    // The counters agree with the tables they describe.
+    let counts = query(
+        conn,
+        "SELECT (SELECT COUNT(*) FROM entries), (SELECT COUNT(*) FROM entry_extras), \
+                (SELECT COUNT(*) FROM unparsed_lines)",
+    );
+    assert_eq!(counts, table(&[&["57", "38", "7"]]));
 }
