@@ -15,6 +15,9 @@
 //! 3. Catch-all. The residual of the raw line against that round trip is the
 //!    line's `entry_extras` row. A promoted value that was not exact is
 //!    therefore still in it, whole, beside the columns that could be read.
+//!    The places of [`ALWAYS_EXTRA`] are taken out of the round trip first:
+//!    the typed parser reads them and the writer puts them in no column, so
+//!    the row keeps them too.
 //!
 //! Promotion goes by key, not by entry type: a line of any type that carries
 //! a promoted key gets the row.
@@ -361,6 +364,81 @@ fn lay(round_trip: &mut Value, place: Place, value: Value) {
     }
 }
 
+// ─── Always kept ─────────────────────────────────────────────────────────
+
+/// Which raw values a place of [`ALWAYS_EXTRA`] is kept for.
+enum Kept {
+    /// Any value.
+    Any,
+    /// A list.
+    List,
+    /// A list that does not hold exactly one element.
+    ListNotOfOne,
+}
+
+impl Kept {
+    fn holds(&self, raw: &Value) -> bool {
+        match self {
+            Kept::Any => true,
+            Kept::List => raw.is_array(),
+            Kept::ListNotOfOne => raw.as_array().is_some_and(|items| items.len() != 1),
+        }
+    }
+}
+
+/// Places that stay in `extra` although the typed round trip reproduces
+/// them, because the writer puts them in no column. One row per place: the
+/// attachment type the row is for (`None` for any line), the object keys
+/// from the line down to the place, and the raw values it is kept for.
+#[rustfmt::skip]
+const ALWAYS_EXTRA: &[(Option<&str>, &[&str], Kept)] = &[
+    // The writer fills no column for this attachment type.
+    (Some("agent_listing_delta"), &["attachment", "addedTypes"], Kept::Any),
+    (Some("agent_listing_delta"), &["attachment", "addedLines"], Kept::Any),
+    (Some("agent_listing_delta"), &["attachment", "removedTypes"], Kept::Any),
+    (Some("agent_listing_delta"), &["attachment", "isInitial"], Kept::Any),
+    (Some("agent_listing_delta"), &["attachment", "showConcurrencyNote"], Kept::Any),
+    // The hook columns have none for it.
+    (None, &["attachment", "blockingError"], Kept::Any),
+    // The writer ignores the ids, and writes a list prompt as the text of
+    // its text parts with a placeholder for every other part.
+    (Some("queued_command"), &["attachment", "imagePasteIds"], Kept::Any),
+    (Some("queued_command"), &["attachment", "prompt"], Kept::List),
+    // `hook_content` holds the list joined by newlines, which gives the
+    // list back only when it has one element.
+    (Some("hook_additional_context"), &["attachment", "content"], Kept::ListNotOfOne),
+];
+
+/// Takes every place of [`ALWAYS_EXTRA`] that the raw line holds out of the
+/// round trip, so that the residual walk finds a key the round trip lacks
+/// and stores the raw value whole.
+fn withhold(raw: &Value, round_trip: &mut Value) {
+    let attachment_type = raw
+        .get("attachment")
+        .and_then(|attachment| attachment.get("type"))
+        .and_then(Value::as_str);
+    for (only, path, kept) in ALWAYS_EXTRA {
+        if only.is_some_and(|only| attachment_type != Some(only)) {
+            continue;
+        }
+        let Some((last, parents)) = path.split_last() else {
+            continue;
+        };
+        let mut held = Some(raw);
+        let mut at = Some(&mut *round_trip);
+        for key in parents {
+            held = held.and_then(|value| value.get(*key));
+            at = at.and_then(|value| value.get_mut(*key));
+        }
+        let keep = held
+            .and_then(|parent| parent.get(*last))
+            .is_some_and(|value| kept.holds(value));
+        if let (true, Some(Value::Object(map))) = (keep, at) {
+            map.remove(*last);
+        }
+    }
+}
+
 /// Adds the fork's rows of one line to `rows` and counts what it stored.
 pub fn attach(raw: &Value, entry: &Entry, rows: &mut EntryRows, drift: &mut Drift) {
     attach_with(raw, serde_json::to_value(entry).ok(), rows, drift);
@@ -391,6 +469,7 @@ fn attach_with(raw: &Value, round_trip: Option<Value>, rows: &mut EntryRows, dri
         for (place, value) in exact {
             lay(&mut round_trip, place, value);
         }
+        withhold(raw, &mut round_trip);
         round_trip
     });
     let (extra, places) = extra_of(raw, round_trip.as_ref(), drift);
@@ -736,5 +815,168 @@ mod tests {
         let bytes = json_len(&raw) as u64;
         assert_eq!(drift.places.get(&key), Some(&(1, bytes)));
         assert_eq!(drift.places.len(), 1);
+    }
+
+    fn attachment_line(attachment: Value) -> Value {
+        json!({"type": "attachment", "uuid": "fx", "attachment": attachment})
+    }
+
+    /// The `extra` of a line once the always-kept places are withheld from
+    /// `round_trip`, and the places it stores. Also runs what the merge check
+    /// runs on the same two values.
+    fn kept(raw: &Value, mut round_trip: Value) -> (Option<Value>, Vec<(String, StoreReason)>) {
+        withhold(raw, &mut round_trip);
+        let (extra, places) = extra_of(raw, Some(&round_trip), &mut Drift::default());
+        let merged = merge(round_trip, extra.as_ref());
+        assert_eq!(unreproduced(raw, &merged), Vec::<String>::new(), "{raw}");
+        let places = places
+            .into_iter()
+            .map(|place| (place.path, place.reason))
+            .collect();
+        (extra, places)
+    }
+
+    /// A kept place is stored the way a key the parser does not model is:
+    /// whole, as a key the round trip lacks.
+    #[test]
+    fn kept_place_is_stored_as_a_missing_key() {
+        let error = json!({"blockingError": "fx", "command": "fx --check"});
+        let raw = attachment_line(json!({
+            "type": "hook_success", "hookName": "fx", "blockingError": error
+        }));
+        let (extra, places) = kept(&raw, raw.clone());
+        assert_eq!(extra, Some(json!({"attachment": {"blockingError": error}})));
+        let place = "attachment.blockingError".to_owned();
+        assert_eq!(places, vec![(place, StoreReason::MissingKey)]);
+    }
+
+    /// A listed key that holds a value of a kind its row does not name, or
+    /// that sits under another attachment type, is left to the round trip.
+    #[test]
+    fn other_kinds_and_other_types_are_not_kept() {
+        for attachment in [
+            json!({"type": "queued_command", "prompt": "fx"}),
+            json!({"type": "queued_command", "prompt": null}),
+            json!({"type": "queued_command", "prompt": {"fx": 1}}),
+            json!({"type": "queued_command", "prompt": 7}),
+            json!({"type": "hook_additional_context", "content": ["fx"]}),
+            json!({"type": "hook_additional_context", "content": "fx"}),
+            json!({"type": "hook_additional_context", "content": null}),
+            json!({
+                "type": "date_change", "addedTypes": ["fx"], "isInitial": true,
+                "prompt": ["fx"], "imagePasteIds": [1], "content": []
+            }),
+        ] {
+            let raw = attachment_line(attachment);
+            assert_eq!(kept(&raw, raw.clone()), (None, Vec::new()), "{raw}");
+        }
+    }
+
+    /// Where the row says any value, the kind does not matter.
+    #[test]
+    fn any_kind_is_kept_where_the_row_says_any() {
+        for value in [json!(null), json!("fx"), json!(7), json!([]), json!({})] {
+            let raw = attachment_line(json!({
+                "type": "queued_command", "prompt": "fx", "imagePasteIds": value
+            }));
+            let (extra, _) = kept(&raw, raw.clone());
+            let want = json!({"attachment": {"imagePasteIds": value}});
+            assert_eq!(extra, Some(want), "{raw}");
+        }
+    }
+
+    /// Shapes the typed parser would not hand over change nothing and
+    /// cannot fail.
+    #[test]
+    fn unexpected_shapes_are_left_alone() {
+        // `attachment` is not an object.
+        for attachment in [json!("fx"), json!(null), json!(["blockingError"]), json!(7)] {
+            let raw = attachment_line(attachment);
+            assert_eq!(kept(&raw, raw.clone()), (None, Vec::new()), "{raw}");
+        }
+        // No `attachment` at all, on the line or in the round trip.
+        let raw = json!({"type": "user", "uuid": "fx"});
+        assert_eq!(kept(&raw, raw.clone()), (None, Vec::new()));
+        let raw = attachment_line(json!({"type": "queued_command", "prompt": ["fx"]}));
+        let (extra, places) = kept(&raw, json!({"type": "attachment", "uuid": "fx"}));
+        assert_eq!(
+            extra,
+            Some(json!({"attachment": {"type": "queued_command", "prompt": ["fx"]}}))
+        );
+        assert_eq!(
+            places,
+            vec![("attachment".to_owned(), StoreReason::MissingKey)]
+        );
+
+        // `attachment.type` is not a string: only the row for any type applies.
+        let raw = attachment_line(json!({"type": 7, "addedTypes": ["fx"], "blockingError": "fx"}));
+        let (extra, _) = kept(&raw, raw.clone());
+        assert_eq!(extra, Some(json!({"attachment": {"blockingError": "fx"}})));
+
+        // An attachment type the parser does not know: the round trip is the
+        // fallback and the whole payload is stored, as without the list.
+        let payload = json!({"type": "zz_future_type", "blockingError": {"fx": 1}, "prompt": []});
+        let raw = attachment_line(payload.clone());
+        let fallback = attachment_line(json!({"type": "unknown"}));
+        let (extra, places) = kept(&raw, fallback);
+        assert_eq!(extra, Some(json!({"attachment": payload})));
+        assert_eq!(
+            places,
+            vec![("attachment".to_owned(), StoreReason::Fallback)]
+        );
+    }
+
+    /// Through [`attach_with`]: without a round trip the line is stored
+    /// whole, kept place included; and a kept place inside an attachment
+    /// whose payload a typed table holds is taken out after that payload is
+    /// laid over the round trip, so it is in both.
+    #[test]
+    fn kept_places_through_attach_with() {
+        let rows = || EntryRows {
+            entry: vec![
+                Value::Null,
+                json!("fx.jsonl"),
+                json!(7),
+                json!("attachment"),
+            ],
+            variant: None,
+            children: Vec::new(),
+        };
+        let extras = |rows: &EntryRows| -> Vec<Value> {
+            rows.children
+                .iter()
+                .filter(|(table, _)| *table == "entry_extras")
+                .flat_map(|(_, table_rows)| table_rows.iter())
+                .filter_map(|row| row.get(1).cloned())
+                .collect()
+        };
+
+        let raw = attachment_line(json!({"type": "hook_cancelled", "blockingError": {}}));
+        let mut without = rows();
+        let mut drift = Drift::default();
+        attach_with(&raw, None, &mut without, &mut drift);
+        assert_eq!(extras(&without), vec![json_str(&raw)]);
+        assert_eq!(drift.reserialize_errors, 1);
+
+        let raw = attachment_line(json!({
+            "type": "thinking_drop", "model": "fx", "blockingError": "fx"
+        }));
+        let mut promoted = rows();
+        let mut drift = Drift::default();
+        let fallback = attachment_line(json!({"type": "unknown"}));
+        attach_with(&raw, Some(fallback), &mut promoted, &mut drift);
+        let want = json!({"attachment": {"blockingError": "fx"}});
+        assert_eq!(extras(&promoted), vec![json_str(&want)]);
+        let key = (
+            "attachment".to_owned(),
+            "thinking_drop".to_owned(),
+            "attachment.blockingError".to_owned(),
+        );
+        assert_eq!(drift.places.get(&key), Some(&(1, "\"fx\"".len() as u64)));
+        assert_eq!(drift.places.len(), 1);
+        assert!(promoted
+            .children
+            .iter()
+            .any(|(table, _)| *table == "attachment_thinking_drops"));
     }
 }
