@@ -1,0 +1,3 @@
+{"type":"cost-state","totalCost":2.5,"sessionId":"fx-session-2"}
+{"type":"zz-future-entry","foo":2,"sessionId":"fx-session-2"}
+{"type":"continued-in","sessionId":"fx-session-2","nextSessionId":"fx-session-3"}
