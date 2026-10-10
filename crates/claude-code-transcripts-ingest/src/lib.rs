@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod cost_decomp;
 pub mod extract;
+pub mod fork_schema;
 pub mod info;
 pub mod parse;
 pub mod pricing;

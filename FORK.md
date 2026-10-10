@@ -33,6 +33,9 @@ git diff --stat v0.1.12..HEAD
 | `crates/claude-code-transcripts-ingest/tests/catch_all.rs` | new | End-to-end test of the fork's behaviour on one synthetic fixture directory. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/catch_all.jsonl` | new | Synthetic fixture: one line per way a line can carry something the typed parser does not model. Lines 34 and 35 are entry types the parser does not know. |
 | `crates/claude-code-transcripts-ingest/tests/fixtures/catch_all/unknown_only.jsonl` | new | Synthetic fixture: a file that holds unknown entry types only. |
+| `crates/claude-code-transcripts-ingest/src/fork_schema.rs` | new | DDL of the twelve tables the fork adds (`FORK_SCHEMA_DDL`) and one unique index per table on its key (`FORK_INDEXES_DDL`). No upstream table gains a column. |
+| `crates/claude-code-transcripts-ingest/src/lib.rs` | changed, 1 line added | `pub mod fork_schema;` |
+| `crates/claude-code-transcripts-ingest/src/run.rs` | changed, 4 lines added | Runs `FORK_SCHEMA_DDL` right after upstream's schema and `FORK_INDEXES_DDL` right after upstream's indexes. |
 
 Every later change adds its row here.
 

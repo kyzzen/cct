@@ -142,4 +142,164 @@ fn catch_all_fixture_ingests() {
     .map(|(k, v)| (k.to_string(), v))
     .collect();
     assert_eq!(unknown_variants, expected_variants);
+
+    fork_tables_exist(&conn);
+}
+
+/// Every cell of a query result as text; SQL NULL reads `NULL`.
+fn query(conn: &Connection, sql: &str) -> Vec<Vec<String>> {
+    use duckdb::types::Value as Cell;
+    let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let mut rows = stmt.query([]).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().unwrap() {
+        let mut cells = Vec::new();
+        let mut i = 0;
+        while let Ok(cell) = row.get::<_, Cell>(i) {
+            cells.push(match cell {
+                Cell::Null => "NULL".to_string(),
+                Cell::Boolean(b) => b.to_string(),
+                Cell::Int(n) => n.to_string(),
+                Cell::BigInt(n) => n.to_string(),
+                Cell::HugeInt(n) => n.to_string(),
+                Cell::Text(s) => s,
+                other => panic!("{sql}: column {i} is {other:?}"),
+            });
+            i += 1;
+        }
+        out.push(cells);
+    }
+    out
+}
+
+fn table(rows: &[&[&str]]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+        .collect()
+}
+
+/// The twelve tables the fork adds, their columns in order, and one unique
+/// index per table on its key.
+fn fork_tables_exist(conn: &Connection) {
+    let columns = query(
+        conn,
+        "SELECT table_name, string_agg(column_name || ' ' || data_type, ', ' ORDER BY ordinal_position) \
+         FROM information_schema.columns \
+         WHERE table_name IN ('entry_extras', 'unparsed_lines', 'attachment_raw_types', \
+             'assistant_turn_fields', 'assistant_input_transformations', 'user_turn_fields', \
+             'user_classifier_contexts', 'attachment_rendered', 'attachment_thinking_drops', \
+             'attachment_prompt_snapshots', 'ingest_drift', 'ingest_meta') \
+         GROUP BY table_name ORDER BY table_name",
+    );
+    let expected = table(&[
+        &[
+            "assistant_input_transformations",
+            "entry_id BIGINT, position INTEGER, transformation_type VARCHAR, path VARCHAR, \
+             reason VARCHAR",
+        ],
+        &[
+            "assistant_turn_fields",
+            "entry_id BIGINT, thinking_duration_ms BIGINT, advisor_model VARCHAR, \
+             input_transformations_count INTEGER",
+        ],
+        &[
+            "attachment_prompt_snapshots",
+            "entry_id BIGINT, model VARCHAR, system_prompt JSON, tools JSON, settings JSON",
+        ],
+        &["attachment_raw_types", "entry_id BIGINT, raw_type VARCHAR"],
+        &[
+            "attachment_rendered",
+            "entry_id BIGINT, rendered_role VARCHAR, rendered JSON",
+        ],
+        &[
+            "attachment_thinking_drops",
+            "entry_id BIGINT, model VARCHAR, request_id VARCHAR, query_source VARCHAR, \
+             thinking_blocks_sent BIGINT, thinking_turns_sent BIGINT, \
+             newly_dropped_block_count BIGINT, newly_dropped_turn_count BIGINT, \
+             newly_dropped_reason VARCHAR, payload JSON",
+        ],
+        &["entry_extras", "entry_id BIGINT, extra JSON"],
+        &[
+            "ingest_drift",
+            "entry_type VARCHAR, attachment_type VARCHAR, path VARCHAR, lines BIGINT, bytes BIGINT",
+        ],
+        &["ingest_meta", "key VARCHAR, value VARCHAR"],
+        &[
+            "unparsed_lines",
+            "file_path VARCHAR, line_no BIGINT, raw_type VARCHAR, session_id VARCHAR, payload JSON",
+        ],
+        &[
+            "user_classifier_contexts",
+            "entry_id BIGINT, request_id VARCHAR, live_cwd VARCHAR, platform VARCHAR, \
+             git_root VARCHAR, git_branch VARCHAR, git_status_clean BOOLEAN, context JSON",
+        ],
+        &[
+            "user_turn_fields",
+            "entry_id BIGINT, turn_origin VARCHAR, turn_prompt_index BIGINT, turn_index BIGINT",
+        ],
+    ]);
+    assert_eq!(columns, expected);
+
+    let indexes = query(
+        conn,
+        "SELECT table_name, index_name, regexp_replace(expressions::VARCHAR, '[\"'']', '', 'g') \
+         FROM duckdb_indexes() \
+         WHERE is_unique AND table_name IN (SELECT DISTINCT table_name FROM information_schema.columns \
+             WHERE table_name IN ('entry_extras', 'unparsed_lines', 'attachment_raw_types', \
+             'assistant_turn_fields', 'assistant_input_transformations', 'user_turn_fields', \
+             'user_classifier_contexts', 'attachment_rendered', 'attachment_thinking_drops', \
+             'attachment_prompt_snapshots', 'ingest_drift', 'ingest_meta')) \
+         ORDER BY table_name",
+    );
+    let expected = table(&[
+        &[
+            "assistant_input_transformations",
+            "uq_assistant_input_transformations_pk",
+            "[entry_id, position]",
+        ],
+        &[
+            "assistant_turn_fields",
+            "uq_assistant_turn_fields_pk",
+            "[entry_id]",
+        ],
+        &[
+            "attachment_prompt_snapshots",
+            "uq_attachment_prompt_snapshots_pk",
+            "[entry_id]",
+        ],
+        &[
+            "attachment_raw_types",
+            "uq_attachment_raw_types_pk",
+            "[entry_id]",
+        ],
+        &[
+            "attachment_rendered",
+            "uq_attachment_rendered_pk",
+            "[entry_id]",
+        ],
+        &[
+            "attachment_thinking_drops",
+            "uq_attachment_thinking_drops_pk",
+            "[entry_id]",
+        ],
+        &["entry_extras", "uq_entry_extras_pk", "[entry_id]"],
+        &[
+            "ingest_drift",
+            "uq_ingest_drift_pk",
+            "[entry_type, attachment_type, path]",
+        ],
+        &["ingest_meta", "uq_ingest_meta_pk", "[key]"],
+        &[
+            "unparsed_lines",
+            "uq_unparsed_lines_pk",
+            "[file_path, line_no]",
+        ],
+        &[
+            "user_classifier_contexts",
+            "uq_user_classifier_contexts_pk",
+            "[entry_id]",
+        ],
+        &["user_turn_fields", "uq_user_turn_fields_pk", "[entry_id]"],
+    ]);
+    assert_eq!(indexes, expected);
 }

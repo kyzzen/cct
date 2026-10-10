@@ -97,6 +97,8 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
         Connection::open(&cli.output).map_err(|e| format!("open {}: {e}", cli.output.display()))?;
     conn.execute_batch(SCHEMA_DDL)
         .map_err(|e| format!("schema init: {e}"))?;
+    conn.execute_batch(crate::fork_schema::FORK_SCHEMA_DDL)
+        .map_err(|e| format!("fork schema init: {e}"))?;
 
     let mut rows = seed_rows();
     if let Some(p) = &cli.pricing {
@@ -254,6 +256,8 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
         .map_err(|e| format!("add primary keys: {e}"))?;
     conn.execute_batch(INDEXES_DDL)
         .map_err(|e| format!("create indexes: {e}"))?;
+    conn.execute_batch(crate::fork_schema::FORK_INDEXES_DDL)
+        .map_err(|e| format!("create fork indexes: {e}"))?;
     conn.execute_batch(DEDUPED_TABLE_DDL)
         .map_err(|e| format!("create deduped table: {e}"))?;
     conn.execute_batch(COMMENTS_DDL)
