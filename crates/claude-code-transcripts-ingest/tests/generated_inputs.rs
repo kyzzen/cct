@@ -34,12 +34,14 @@ fn drift_cap_and_large_values() {
     let mut text = String::new();
     // Line 1: an entry type the parser does not know, about 2 MB.
     writeln!(text, r#"{{"type":"zz-big-entry","blob":"{big}"}}"#).unwrap();
-    // Line 2: a second unknown entry type.
-    writeln!(
-        text,
-        r#"{{"type":"cost-state","totalCost":1.5,"note":"gx\u0000nul"}}"#
-    )
-    .unwrap();
+    // Line 2: a second unknown entry type, with an escaped NUL character in
+    // a string, a raw NUL character between two members, spaces around the
+    // line and a CRLF line end.
+    text.push_str("  ");
+    text.push_str(r#"{"type":"cost-state","totalCost":1.5,"#);
+    text.push('\0');
+    text.push_str(r#""note":"gx\u0000nul"}"#);
+    text.push_str("  \r\n");
     // Line 3: a key spelled like the row that collects the places past the cap.
     writeln!(
         text,
@@ -82,6 +84,13 @@ fn drift_cap_and_large_values() {
         text,
         r#"{{"type":"assistant","uuid":"gx-s1",{ENVELOPE},"requestId":"gx-req","message":{{"id":"gx-msg","type":"message","role":"assistant","model":"gx-model","content":[{{"type":"text","text":"gx"}}],"stop_reason":"end_turn","stop_sequence":null,"usage":{{"input_tokens":1,"output_tokens":2}},"input_transformations":[{}]}}}}"#,
         items.join(",")
+    )
+    .unwrap();
+    // Last line: promoted keys on an entry type that does not carry them in
+    // real input. Promotion goes by key, so each gets its typed row.
+    writeln!(
+        text,
+        r#"{{"type":"user","uuid":"gx-foreign",{ENVELOPE},"message":{{"role":"user","content":"gx"}},"thinkingDurationMs":5,"renderedRole":"user"}}"#
     )
     .unwrap();
     fs::write(in_dir.join("generated.jsonl"), &text).unwrap();
@@ -162,15 +171,18 @@ fn drift_cap_and_large_values() {
         1 + 3 + USER_KEYS as i64
     );
 
-    // An escaped NUL character is stored as written, in both places.
+    // An escaped NUL character is stored as written, in both places. The
+    // payload of an unparsed line is the text the parser read: upstream
+    // removes raw NUL characters and the surrounding white space first.
     let stored_text = |sql: &str| -> String {
         conn.query_row(sql, [], |r| r.get(0))
             .unwrap_or_else(|e| panic!("{sql}: {e}"))
     };
     assert_eq!(
         stored_text("SELECT payload FROM unparsed_lines WHERE line_no = 2"),
-        text.lines().nth(1).unwrap()
+        r#"{"type":"cost-state","totalCost":1.5,"note":"gx\u0000nul"}"#
     );
+    assert!(text.lines().nth(1).unwrap().contains('\0'));
     assert_eq!(
         stored_text(
             "SELECT x.extra::VARCHAR FROM entry_extras x JOIN entries e USING (entry_id) \
@@ -190,7 +202,7 @@ fn drift_cap_and_large_values() {
     assert_eq!(
         count(
             &conn,
-            "SELECT length(rendered::VARCHAR) FROM attachment_rendered WHERE rendered_role = 'user'"
+            "SELECT length(rendered::VARCHAR) FROM attachment_rendered WHERE rendered IS NOT NULL"
         ),
         (r#"[{"content":""}]"#.len() + BIG) as i64
     );
@@ -204,7 +216,8 @@ fn drift_cap_and_large_values() {
     assert_eq!(
         count(
             &conn,
-            "SELECT input_transformations_count FROM assistant_turn_fields"
+            "SELECT input_transformations_count FROM assistant_turn_fields \
+             WHERE input_transformations_count IS NOT NULL"
         ),
         LIST_ITEMS as i64
     );
@@ -225,4 +238,18 @@ fn drift_cap_and_large_values() {
         ),
         0
     );
+
+    // The line of another entry type that carries promoted keys.
+    let foreign: (String, i64, String, i64) = conn
+        .query_row(
+            "SELECT e.type, t.thinking_duration_ms, r.rendered_role, \
+                    (SELECT COUNT(*) FROM entry_extras x WHERE x.entry_id = e.entry_id) \
+             FROM entries e JOIN assistant_turn_fields t USING (entry_id) \
+                  JOIN attachment_rendered r USING (entry_id) \
+             WHERE e.line_no = ? AND t.advisor_model IS NULL AND r.rendered IS NULL",
+            [lines],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("typed rows of the last line");
+    assert_eq!(foreign, ("user".to_string(), 5, "user".to_string(), 0));
 }

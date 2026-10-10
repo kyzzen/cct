@@ -363,6 +363,12 @@ fn lay(round_trip: &mut Value, place: Place, value: Value) {
 
 /// Adds the fork's rows of one line to `rows` and counts what it stored.
 pub fn attach(raw: &Value, entry: &Entry, rows: &mut EntryRows, drift: &mut Drift) {
+    attach_with(raw, serde_json::to_value(entry).ok(), rows, drift);
+}
+
+/// [`attach`] with the typed round trip handed in: `None` when the entry
+/// could not be serialised back.
+fn attach_with(raw: &Value, round_trip: Option<Value>, rows: &mut EntryRows, drift: &mut Drift) {
     drift.lines_read += 1;
     let mut promotion = Promotion {
         raw,
@@ -381,7 +387,7 @@ pub fn attach(raw: &Value, entry: &Entry, rows: &mut EntryRows, drift: &mut Drif
         ..
     } = promotion;
 
-    let round_trip = serde_json::to_value(entry).ok().map(|mut round_trip| {
+    let round_trip = round_trip.map(|mut round_trip| {
         for (place, value) in exact {
             lay(&mut round_trip, place, value);
         }
@@ -692,4 +698,43 @@ pub fn write_summary(conn: &Connection, drift: &Drift, entries: i64) -> Result<(
     }
     conn.execute_batch("COMMIT")
         .map_err(|e| format!("commit ingest summary: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// No input reaches this path: the typed entry of a line that parsed has
+    /// always serialised back. The line is then stored whole and counted.
+    #[test]
+    fn line_without_round_trip_is_stored_whole() {
+        let raw = json!({"type": "user", "turnOrigin": "fx", "zz": [1, {"k": null}, 1.5]});
+        let mut rows = EntryRows {
+            entry: vec![Value::Null, json!("fx.jsonl"), json!(7), json!("user")],
+            variant: None,
+            children: Vec::new(),
+        };
+        let mut drift = Drift::default();
+        attach_with(&raw, None, &mut rows, &mut drift);
+
+        let whole = vec![vec![Value::Null, json_str(&raw)]];
+        let typed = vec![vec![Value::Null, json!("fx"), Value::Null, Value::Null]];
+        assert_eq!(
+            rows.children,
+            vec![("user_turn_fields", typed), ("entry_extras", whole)]
+        );
+        assert_eq!(
+            (
+                drift.lines_read,
+                drift.extras_rows,
+                drift.reserialize_errors
+            ),
+            (1, 1, 1)
+        );
+        let key = ("user".to_owned(), String::new(), "(root)".to_owned());
+        let bytes = json_len(&raw) as u64;
+        assert_eq!(drift.places.get(&key), Some(&(1, bytes)));
+        assert_eq!(drift.places.len(), 1);
+    }
 }
