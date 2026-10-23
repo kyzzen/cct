@@ -10,7 +10,7 @@ description: Query the local DuckDB of ingested Claude Code transcripts (`~/.loc
 
 Both `cct` and `duckdb` are required. If either is missing, see [Prerequisites](#prerequisites-cct-and-duckdb).
 
-The raw JSONL line is **not** stored in the DB; every entry keeps `file_path` + `line_no` so the original line can be pulled from disk on demand (see [Accessing the original JSONL line](#accessing-the-original-jsonl-line)).
+Raw JSONL lines with unknown types are stored in `unparsed_lines.payload`; recognized entries keep `file_path` + `line_no` so the original line can be pulled from disk on demand (see [Accessing the original JSONL line](#accessing-the-original-jsonl-line)).
 
 The schema is heavily self-documented via DuckDB `COMMENT ON` metadata — FK relationships, billing-safety warnings, and semantic notes. When in doubt, query the comments (see [Introspection](#introspection-when-stuck)).
 
@@ -859,7 +859,7 @@ Polymorphic data is stored as DuckDB `JSON`. Query with `->`, `->>`, `json_extra
 
 ## Accessing the original JSONL line
 
-The raw JSONL line is intentionally not stored — it would roughly double DB size and every field is already parsed into typed columns. When you genuinely need the untouched line (debugging a parse failure, inspecting a field ingest dropped, reproducing an edge case), reconstruct it from `entries.file_path` + `entries.line_no` (1-indexed, matches `sed -n 'Np'` and `awk 'NR==N'`).
+Recognized entries use typed columns instead of storing a raw JSONL copy; unknown-type lines are preserved in `unparsed_lines.payload`. When you genuinely need the untouched line (debugging a parse failure, inspecting a field ingest dropped, reproducing an edge case), reconstruct it from `entries.file_path` + `entries.line_no` (1-indexed, matches `sed -n 'Np'` and `awk 'NR==N'`).
 
 ```sql
 SELECT file_path, line_no
