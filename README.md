@@ -56,7 +56,7 @@ Then ask Claude anything about your usage:
 - "Show me the 10 most expensive turns and what they were doing."
 - "How much is the `frontend-design` skill costing me per invocation?"
 
-Claude picks up the schema from the `cct-db` skill and runs SQL against your local DB.
+Claude picks up the schema from the `cct-db` skill and runs SQL against your local DB. The cct database defaults to `transcripts.duckdb` in a `cct` folder under `XDG_DATA_HOME`, or under `/home/demelain/.local/share` when that variable is unset or empty; CLI arguments can change it. `/home/demelain/dev_sandbox/tools/cct/crates/claude-code-transcripts-ingest/src/cli.rs "fn default_output_db"` Each `cct ingest` run removes the previous database and its WAL before rebuilding.
 
 Or skip Claude entirely for the common cases:
 
