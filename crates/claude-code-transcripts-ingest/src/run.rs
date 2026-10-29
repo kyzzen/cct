@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use crossbeam_channel::bounded;
 use duckdb::types::{TimeUnit, ValueRef};
-use duckdb::{appender_params_from_iter, params, Connection, ToSql};
+use duckdb::{appender_params_from_iter, params, Config, Connection, ToSql};
 use rayon::prelude::*;
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -93,8 +93,13 @@ pub fn run_ingest(cli: IngestArgs) -> Result<RunSummary, String> {
         cli.input_dir.display()
     );
 
-    let mut conn =
-        Connection::open(&cli.output).map_err(|e| format!("open {}: {e}", cli.output.display()))?;
+    // Readers of the output may run a DuckDB older than the bundled engine,
+    // so the file is created in a storage format DuckDB 1.5 can open.
+    let config = Config::default()
+        .with("storage_compatibility_version", "v1.5.0")
+        .map_err(|e| format!("config: {e}"))?;
+    let mut conn = Connection::open_with_flags(&cli.output, config)
+        .map_err(|e| format!("open {}: {e}", cli.output.display()))?;
     conn.execute_batch(SCHEMA_DDL)
         .map_err(|e| format!("schema init: {e}"))?;
     conn.execute_batch(crate::fork_schema::FORK_SCHEMA_DDL)
