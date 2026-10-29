@@ -46,7 +46,11 @@ echo "src:      $SRC_DB"
 echo "dest:     $DEST_DB"
 echo "sessions: $(grep -cv '^[[:space:]]*\(#\|$\)' "$SESSIONS_FILE")"
 
-duckdb "$DEST_DB" <<SQL
+duckdb <<SQL
+-- 1.5 storage format, so cct's bundled DuckDB can open the demo DB whatever
+-- version the duckdb CLI is.
+ATTACH '$DEST_DB' AS demo (STORAGE_VERSION 'v1.5.0');
+USE demo;
 ATTACH '$SRC_DB' AS src (READ_ONLY);
 
 -- ── chosen sessions + files ──────────────────────────────────────────────
@@ -235,7 +239,7 @@ SELECT
   se.tool_use_id,
   se.duration_ms,
   se.message_count,
-  NULL                              AS url,
+  NULL::VARCHAR                     AS url,
   se.upgrade_nudge,
   se.compact_trigger,
   se.compact_pre_tokens,
@@ -361,8 +365,8 @@ SELECT
   acb.block_type,
   fakepara(acb.text)                AS text,
   fakepara(acb.thinking)            AS thinking,
-  NULL                              AS signature,
-  NULL                              AS redacted_data,
+  NULL::VARCHAR                     AS signature,
+  NULL::VARCHAR                     AS redacted_data,
   acb.tool_use_id,
   acb.tool_name,
   CASE
