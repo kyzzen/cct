@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/Alfredvc/cct/main/install.sh | sh
 
 Downloads the latest prebuilt `cct` binary into `~/.local/bin`. Override with `CCT_INSTALL_DIR=/some/dir` or pin a version with `CCT_VERSION=v0.2.0`. Source: [`crates/claude-code-transcripts-ingest/`](crates/claude-code-transcripts-ingest/).
 
-This fork does not support `cct update`; build and install a new binary from the fork to upgrade. `cct` checks GitHub for a newer release once every 24 hours in the background and prints a one-line banner on stderr when one is available. Set `CCT_NO_UPDATE_CHECK=1` (or `CI=true`) to disable. Cache lives at `~/.cache/cct/update_check.json`.
+This fork does not support `cct update`; build and install a new binary from the fork to upgrade. On interactive stderr, `cct` refreshes its GitHub release cache in the background when it is missing or over 24 hours old and prints a multi-line banner when the cached release is newer. Set `CCT_NO_UPDATE_CHECK=1` (or `CI=true`) to disable. Cache lives at `$XDG_CACHE_HOME/cct/update_check.json`, falling back to `/home/demelain/.cache/cct/update_check.json` when `XDG_CACHE_HOME` is unset or empty. `/home/demelain/dev_sandbox/tools/cct/crates/claude-code-transcripts-ingest/src/version_check.rs "fn gates_open("`; `/home/demelain/dev_sandbox/tools/cct/crates/claude-code-transcripts-ingest/src/version_check.rs "fn should_refresh("`; `/home/demelain/dev_sandbox/tools/cct/crates/claude-code-transcripts-ingest/src/version_check.rs "fn format_banner_if_newer("`; `/home/demelain/dev_sandbox/tools/cct/crates/claude-code-transcripts-ingest/src/version_check.rs "fn cache_path_with_env("`.
 
 ### 2. Skills
 
