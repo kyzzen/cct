@@ -1,3 +1,5 @@
+> **This is a fork.** cct was created by Alfredo V. Clemente: [Alfredvc/cct](https://github.com/Alfredvc/cct), licensed MIT OR Apache-2.0. This fork is based on v0.1.12 and adds storage for the transcript fields the upstream parser drops. [FORK.md](FORK.md) lists every change. The README below is upstream's.
+
 <h1 align="center">cct — Claude Code Transcripts</h1>
 
 <p align="center">
